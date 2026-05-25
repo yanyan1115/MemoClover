@@ -107,7 +107,10 @@ def memory_search(query: str, limit: int = 10, after: Optional[str] = None, befo
     Combines FTS5 keyword, vector semantic, and exact-match channels with per-pool reranking.
     Falls back to keyword-only if no embedding provider is configured.
     after/before: ISO date strings to filter by time range (e.g. '2026-04-01' or '2026-04-01T10:00:00')."""
-    return unified_search_text(query=query, limit=limit, after=after, before=before)
+    try:
+        return unified_search_text(query=query, limit=limit, after=after, before=before)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
 
 @mcp.tool()
@@ -126,7 +129,10 @@ def memory_daily_log(text: str) -> str:
 def memory_list(category: Optional[str] = None, limit: int = 20, after: Optional[str] = None, before: Optional[str] = None) -> str:
     """List memories (newest first).
     after/before: ISO date strings to filter by time range (e.g. '2026-04-01' or '2026-04-01T10:00:00')."""
-    items = get_all(category=category, limit=limit, after=after, before=before)
+    try:
+        items = get_all(category=category, limit=limit, after=after, before=before)
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not items:
         return "No memories yet"
     lines = []
@@ -151,18 +157,27 @@ def memory_update(
     category: str = "",
     importance: int = 0,
     resolved: int = -1,
+    tags: str = "",
 ) -> str:
     """Update a memory by ID. Only pass fields you want to change.
-    content: new content (empty = keep). category: new category (empty = keep). importance: new value (0 = keep). resolved: -1 = keep, 0/1 = update."""
+    content: new content (empty = keep). category: new category (empty = keep). importance: new value (0 = keep). resolved: -1 = keep, 0/1 = update. tags: comma-separated replacement tags."""
     result = update_memory(
         memory_id,
         content=content,
         category=category,
         importance=importance,
         resolved=resolved,
+        tags=tags,
     )
     if result["ok"]:
-        return f"Updated memory #{memory_id}"
+        memory = result.get("memory") or {}
+        return "\n".join([
+            f"Updated memory #{memory_id}",
+            f"Updated: {result.get('updated_at', '')}",
+            f"Category: {memory.get('category', '')}",
+            f"Tags: {memory.get('tags', '[]')}",
+            f"Embedding: {result.get('embedding_status', 'unknown')}",
+        ])
     return f"Error: {result['error']}"
 
 

@@ -1,0 +1,200 @@
+import os
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+_TMP = tempfile.TemporaryDirectory()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ["IMPRINT_DATA_DIR"] = _TMP.name
+os.environ["IMPRINT_DB"] = os.path.join(_TMP.name, "memory.db")
+os.environ["EMBED_PROVIDER"] = "openai"
+os.environ["OPENAI_API_KEY"] = ""
+
+from memo_clover import db as db_mod  # noqa: E402
+from memo_clover import memory_manager as mm  # noqa: E402
+from memo_clover import server  # noqa: E402
+
+
+def _use_temp_database():
+    data_dir = Path(_TMP.name)
+    db_mod.DATA_DIR = data_dir
+    db_mod.DB_PATH = data_dir / "memory.db"
+    db_mod.DAILY_LOG_DIR = data_dir / "memory"
+    db_mod.BANK_DIR = data_dir / "memory" / "bank"
+    db_mod.MEMORY_INDEX = data_dir / "MEMORY.md"
+    mm.DATA_DIR = db_mod.DATA_DIR
+    mm.DB_PATH = db_mod.DB_PATH
+    mm.DAILY_LOG_DIR = db_mod.DAILY_LOG_DIR
+    mm.BANK_DIR = db_mod.BANK_DIR
+    mm.MEMORY_INDEX = db_mod.MEMORY_INDEX
+
+
+def _reset_database():
+    _use_temp_database()
+    db = db_mod._get_db()
+    try:
+        for table in (
+            "memory_tags",
+            "memory_vectors",
+            "bank_chunks",
+            "conversation_log",
+            "memories",
+        ):
+            db.execute(f"DELETE FROM {table}")
+        db.commit()
+    finally:
+        db.close()
+
+
+def _memory_id_from_response(response: str) -> int:
+    match = re.search(r"#(\d+)", response)
+    if not match:
+        raise AssertionError(f"memory id not found in response: {response}")
+    return int(match.group(1))
+
+
+def _memory_row(memory_id: int) -> dict:
+    db = db_mod._get_db()
+    try:
+        row = db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        if row is None:
+            raise AssertionError(f"memory not found: {memory_id}")
+        return dict(row)
+    finally:
+        db.close()
+
+
+def _set_created_at(memory_id: int, created_at: str) -> None:
+    db = db_mod._get_db()
+    try:
+        db.execute(
+            "UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?",
+            (created_at, created_at, memory_id),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+class MemoryApiStabilityTests(unittest.TestCase):
+    def setUp(self):
+        mm._embed = lambda _text: None
+        _reset_database()
+
+    def test_remember_returns_id_and_id_can_update_memory(self):
+        response = server.memory_remember(
+            "stable api remember returns id",
+            category="facts",
+            source="test",
+        )
+
+        memory_id = _memory_id_from_response(response)
+        self.assertIn("Remembered", response)
+        self.assertIn(f"#{memory_id}", response)
+
+        update = server.memory_update(memory_id, content="stable api update by returned id")
+        self.assertIn(f"Updated memory #{memory_id}", update)
+        self.assertEqual(_memory_row(memory_id)["content"], "stable api update by returned id")
+
+    def test_search_text_results_include_updateable_memory_id(self):
+        response = server.memory_remember("stableid searchable memory", category="facts")
+        memory_id = _memory_id_from_response(response)
+
+        search = server.memory_search("stableid", limit=5)
+
+        self.assertIn(f"#{memory_id}", search)
+        self.assertIn("stableid searchable memory", search)
+
+    def test_search_result_id_can_be_passed_to_update(self):
+        response = server.memory_remember("api id handoff original keyword", category="facts")
+        memory_id = _memory_id_from_response(response)
+        search = server.memory_search("handoff original", limit=5)
+        found_id = _memory_id_from_response(search)
+
+        self.assertEqual(found_id, memory_id)
+        result = mm.update_memory(found_id, content="api id handoff updated keyword")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["id"], memory_id)
+        self.assertEqual(_memory_row(memory_id)["content"], "api id handoff updated keyword")
+
+    def test_memory_list_iso_time_filters(self):
+        old_id = _memory_id_from_response(server.memory_remember("old iso filter memory"))
+        middle_id = _memory_id_from_response(server.memory_remember("middle iso filter memory"))
+        new_id = _memory_id_from_response(server.memory_remember("new iso filter memory"))
+        _set_created_at(old_id, "2026-05-20 08:00:00")
+        _set_created_at(middle_id, "2026-05-21 12:34:56")
+        _set_created_at(new_id, "2026-05-22 09:00:00")
+
+        date_only = server.memory_list(after="2026-05-21", before="2026-05-21")
+        self.assertIn("middle iso filter memory", date_only)
+        self.assertNotIn("old iso filter memory", date_only)
+        self.assertNotIn("new iso filter memory", date_only)
+
+        z_suffix = server.memory_list(after="2026-05-21T12:34:56Z")
+        self.assertIn("middle iso filter memory", z_suffix)
+        self.assertIn("new iso filter memory", z_suffix)
+        self.assertNotIn("old iso filter memory", z_suffix)
+
+        offset = server.memory_list(before="2026-05-21T13:34:56+01:00")
+        self.assertIn("middle iso filter memory", offset)
+        self.assertIn("old iso filter memory", offset)
+        self.assertNotIn("new iso filter memory", offset)
+
+    def test_invalid_iso_filter_returns_clear_error(self):
+        server.memory_remember("invalid iso guard memory")
+
+        response = server.memory_list(after="not-a-date")
+
+        self.assertIn("Error: invalid ISO 8601 timestamp", response)
+
+    def test_update_content_updated_at_tags_and_search_index(self):
+        memory_id = _memory_id_from_response(
+            server.memory_remember("oldkeyword update index source", category="facts")
+        )
+        before = _memory_row(memory_id)["updated_at"]
+
+        result = mm.update_memory(
+            memory_id,
+            content="newkeyword update index target",
+            tags=["api", "stable"],
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["id"], memory_id)
+        self.assertIsNotNone(result["updated_at"])
+        self.assertNotEqual(result["updated_at"], before)
+        self.assertEqual(result["embedding_status"], "pending_reindex")
+
+        row = _memory_row(memory_id)
+        self.assertEqual(row["content"], "newkeyword update index target")
+        self.assertEqual(row["tags"], '["api", "stable"]')
+
+        new_search = server.memory_search("newkeyword", limit=5)
+        old_search = server.memory_search("oldkeyword", limit=5)
+        self.assertIn(f"#{memory_id}", new_search)
+        self.assertIn("newkeyword update index target", new_search)
+        self.assertNotIn("oldkeyword update index source", old_search)
+
+    def test_update_handles_nonexistent_and_empty_updates(self):
+        missing = mm.update_memory(999999, content="nope")
+        empty = mm.update_memory(999999)
+
+        self.assertFalse(missing["ok"])
+        self.assertIn("not found", missing["error"])
+        self.assertFalse(empty["ok"])
+
+        memory_id = _memory_id_from_response(server.memory_remember("empty update target"))
+        empty_existing = mm.update_memory(memory_id)
+        self.assertFalse(empty_existing["ok"])
+        self.assertIn("No update fields provided", empty_existing["error"])
+
+
+if __name__ == "__main__":
+    try:
+        unittest.main(verbosity=2)
+    finally:
+        _TMP.cleanup()

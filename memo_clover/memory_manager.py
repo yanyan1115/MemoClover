@@ -12,7 +12,7 @@ import re
 import sqlite3
 import struct
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -246,8 +246,57 @@ def _recency_score(created_at: str) -> float:
 
 
 def datetime_strptime(s: str):
-    from datetime import datetime
-    return datetime.strptime(s, "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+    text = str(s or "").strip()
+    for fmt, size in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d %H:%M", 16)):
+        try:
+            return datetime.strptime(text[:size], fmt).replace(tzinfo=LOCAL_TZ)
+        except ValueError:
+            continue
+    raise ValueError(f"invalid database timestamp: {s!r}")
+
+
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _normalize_iso_bound(value: Optional[str], *, end_of_day: bool = False) -> Optional[str]:
+    """Convert accepted ISO 8601 date/datetime bounds to DB timestamp text."""
+    if value is None or value == "":
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    try:
+        if _DATE_ONLY_RE.match(raw):
+            parsed_date = datetime.strptime(raw, "%Y-%m-%d").date()
+            parsed = datetime.combine(
+                parsed_date,
+                time.max.replace(microsecond=0) if end_of_day else time.min,
+                tzinfo=LOCAL_TZ,
+            )
+        else:
+            normalized = raw.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=LOCAL_TZ)
+            else:
+                parsed = parsed.astimezone(LOCAL_TZ)
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid ISO 8601 timestamp: {value!r}; expected YYYY-MM-DD or ISO datetime"
+        ) from exc
+
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _normalize_time_bounds(
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    return (
+        _normalize_iso_bound(after, end_of_day=False),
+        _normalize_iso_bound(before, end_of_day=True),
+    )
 
 
 # ─── Core API ────────────────────────────────────────────
@@ -290,7 +339,7 @@ def remember(content: str, category: str = "general", source: str = "cc",
     ).fetchone()
     if existing:
         db.close()
-        return "Duplicate memory, skipped"
+        return f"Duplicate memory, skipped (existing id #{existing['id']})"
 
     # Generate embedding early (reused for semantic dedup + storage)
     vec = _embed(content)
@@ -355,10 +404,48 @@ def remember(content: str, category: str = "general", source: str = "cc",
     db.close()
     _rebuild_index()
 
-    result = f"Remembered [{category}]: {content[:50]}..."
+    result = (
+        f"Remembered #{memory_id} [{category}]: {content[:50]}...\n"
+        f"Created: {now}\n"
+        f"Tags: {tags_json}"
+    )
     if supersede_notes:
         result += "\n" + "\n".join(supersede_notes)
     return result
+
+
+def _normalize_tags_input(tags) -> Optional[list[str]]:
+    if tags is None:
+        return None
+    if isinstance(tags, str):
+        raw = tags.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                tags = parsed
+            else:
+                tags = raw.split(",")
+        except json.JSONDecodeError:
+            tags = raw.split(",")
+    normalized = []
+    seen = set()
+    for tag in tags:
+        item = str(tag).strip()
+        if item and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+def _sync_memory_tags(db: sqlite3.Connection, memory_id: int, tags: list[str]) -> None:
+    db.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
+    for tag in tags:
+        db.execute(
+            "INSERT INTO memory_tags (memory_id, tag) VALUES (?, ?)",
+            (memory_id, tag),
+        )
 
 
 def forget(keyword: str) -> str:
@@ -405,6 +492,7 @@ def update_memory(
     category: str = "",
     importance: int = 0,
     resolved: int = -1,
+    tags=None,
 ) -> dict:
     """Update a single memory by ID. Only non-empty/non-zero fields are changed."""
     db = _get_db()
@@ -413,26 +501,45 @@ def update_memory(
         db.close()
         return {"ok": False, "error": f"Memory {memory_id} not found"}
 
-    new_content = content.strip() if content.strip() else row["content"]
-    new_category = category.strip() if category.strip() else row["category"]
-    new_importance = importance if importance > 0 else row["importance"]
-    new_resolved = row["resolved"] if resolved not in (0, 1) else resolved
+    tags_list = _normalize_tags_input(tags)
+    has_content = bool(content and content.strip())
+    has_category = bool(category and category.strip())
+    has_importance = importance > 0
+    has_resolved = resolved in (0, 1)
+    has_tags = tags_list is not None
+    if not any((has_content, has_category, has_importance, has_resolved, has_tags)):
+        db.close()
+        return {"ok": False, "error": "No update fields provided"}
+
+    new_content = content.strip() if has_content else row["content"]
+    new_category = category.strip() if has_category else row["category"]
+    new_importance = importance if has_importance else row["importance"]
+    new_resolved = resolved if has_resolved else row["resolved"]
+    new_tags_json = (
+        json.dumps(tags_list, ensure_ascii=False)
+        if has_tags
+        else row["tags"]
+    )
     new_decay_rate = (
         _decay_rate_for_category(new_category)
         if new_category != row["category"]
         else row["decay_rate"]
     )
+    updated_at = now_str()
 
     db.execute(
         """UPDATE memories
-           SET content = ?, category = ?, importance = ?,
+           SET content = ?, category = ?, tags = ?, importance = ?,
                resolved = ?, decay_rate = ?, updated_at = ?
            WHERE id = ?""",
         (
-            new_content, new_category, new_importance,
-            new_resolved, new_decay_rate, now_str(), memory_id,
+            new_content, new_category, new_tags_json, new_importance,
+            new_resolved, new_decay_rate, updated_at, memory_id,
         ),
     )
+    if has_tags:
+        _sync_memory_tags(db, memory_id, tags_list)
+
     # Only refresh embedding if content changed
     vec_refreshed = False
     if new_content != row["content"]:
@@ -444,11 +551,22 @@ def update_memory(
                 (memory_id, _vec_to_blob(vec), EMBED_MODEL),
             )
             vec_refreshed = True
+    embedding_status = "unchanged"
+    if new_content != row["content"]:
+        embedding_status = "refreshed" if vec_refreshed else "pending_reindex"
 
     db.commit()
+    updated = db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
     db.close()
     _rebuild_index()
-    return {"ok": True, "embedding_refreshed": vec_refreshed}
+    return {
+        "ok": True,
+        "id": memory_id,
+        "updated_at": updated_at,
+        "memory": dict(updated) if updated else None,
+        "embedding_refreshed": vec_refreshed,
+        "embedding_status": embedding_status,
+    }
 
 
 def search(query: str, limit: int = 10, category: Optional[str] = None) -> list[dict]:
@@ -601,18 +719,19 @@ def get_all(category: Optional[str] = None, limit: int = 50, after: Optional[str
     """Get all active memories (by time desc). Excludes superseded memories.
     after: ISO date string, only memories created on or after this date (e.g. '2026-04-01').
     before: ISO date string, only memories created on or before this date."""
+    after_bound, before_bound = _normalize_time_bounds(after=after, before=before)
     db = _get_db()
     filters = []
     params: list = []
     if category:
         filters.append("AND category = ?")
         params.append(category)
-    if after:
+    if after_bound:
         filters.append("AND created_at >= ?")
-        params.append(after)
-    if before:
+        params.append(after_bound)
+    if before_bound:
         filters.append("AND created_at <= ?")
-        params.append(before)
+        params.append(before_bound)
     filter_sql = " ".join(filters)
     rows = db.execute(
         f"SELECT * FROM memories WHERE superseded_by IS NULL {filter_sql} ORDER BY created_at DESC LIMIT ?",
@@ -1774,7 +1893,9 @@ def unified_search(
     if pools is None:
         pools = ["memory", "bank", "conversation"]
 
-    if (after or before) and "bank" in pools:
+    after_bound, before_bound = _normalize_time_bounds(after=after, before=before)
+
+    if (after_bound or before_bound) and "bank" in pools:
         pools = [p for p in pools if p != "bank"]
 
     db = _get_db()
@@ -1870,14 +1991,14 @@ def unified_search(
     results.sort(key=lambda x: x["score"], reverse=True)
 
     # Time range filtering (after/before)
-    if after or before:
+    if after_bound or before_bound:
         def _in_time_range(r):
             ts = r.get("created_at", "")
             if not ts:
                 return True
-            if after and ts < after:
+            if after_bound and ts < after_bound:
                 return False
-            if before and ts > before:
+            if before_bound and ts > before_bound:
                 return False
             return True
         results = [r for r in results if _in_time_range(r)]
@@ -1940,22 +2061,25 @@ def unified_search_text(
         if r["pool"] == "memory":
             cat = r.get("category", "")
             ts = r.get("created_at", "")
+            memory_id = r.get("id", "")
             pin = " [pinned]" if r.get("pinned") else ""
             if r.get("source") == "edge":
                 rel = r.get("edge_relation", "")
-                lines.append(f"[{label}|edge|{rel}] {content}")
+                lines.append(f"[{label}|edge|{rel}] #{memory_id} {content}")
             else:
-                lines.append(f"[{label}|{cat}|{ts}]{pin} ({score}) {content}")
+                lines.append(f"[{label}|{cat}|{ts}]{pin} #{memory_id} ({score}) {content}")
 
         elif r["pool"] == "bank":
             src = r.get("source", "")
-            lines.append(f"[{label}|{src}] ({score}) {content}")
+            bank_id = r.get("id", "")
+            lines.append(f"[{label}|{src}|id=bank:{bank_id}] ({score}) {content}")
 
         elif r["pool"] == "conversation":
             plat = r.get("platform", "")
             dire = "<-" if r.get("direction") == "in" else "->"
             ts = r.get("created_at", "")
-            lines.append(f"[{label}|{plat}{dire}|{ts}] ({score}) {content}")
+            conv_id = r.get("id", "")
+            lines.append(f"[{label}|{plat}{dire}|{ts}|id=conversation:{conv_id}] ({score}) {content}")
 
     return "\n".join(lines)
 
