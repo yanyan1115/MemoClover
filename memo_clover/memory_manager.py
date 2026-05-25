@@ -2083,8 +2083,9 @@ def unified_search(
 
     results = results[:limit]
 
-    # Graph expansion: append edge-connected memories
-    if "memory" in pools:
+    # Graph expansion increments memory_edges.surfaced_count, so internal/dry-run
+    # callers must skip it to keep search fully read-only.
+    if "memory" in pools and not _internal:
         results = _expand_via_edges(results, db, max_expand=3)
 
     # Side-effect: update last_accessed_at + recalled_count

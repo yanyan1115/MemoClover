@@ -52,6 +52,7 @@ def _reset_database():
     db = db_mod._get_db()
     try:
         for table in (
+            "memory_edges",
             "memory_vectors",
             "bank_chunks",
             "conversation_log",
@@ -185,6 +186,49 @@ class RetrievalEvaluationTests(unittest.TestCase):
         self.assertEqual(results[0]["pool"], "conversation")
         self.assertEqual(results[0]["id"], self.conversation_id)
         self.assertIn("telegram incident", results[0]["content"])
+
+    def test_internal_search_does_not_increment_edge_surface_count(self):
+        source_id = _insert_memory("edge source recall token")
+        target_id = _insert_memory("neighbor-only context")
+        edge = mm.add_edge(source_id, target_id, "related", "test edge")
+        self.assertTrue(edge["ok"])
+
+        internal_results = mm.unified_search(
+            "edge source recall token",
+            pools=["memory"],
+            limit=5,
+            _internal=True,
+        )
+        self.assertIn(source_id, [r["id"] for r in internal_results])
+        self.assertNotIn(target_id, [r["id"] for r in internal_results if r.get("edge_relation")])
+
+        db = db_mod._get_db()
+        try:
+            surfaced = db.execute(
+                "SELECT surfaced_count FROM memory_edges WHERE id = ?",
+                (edge["edge_id"],),
+            ).fetchone()["surfaced_count"]
+        finally:
+            db.close()
+        self.assertEqual(surfaced, 0)
+
+        normal_results = mm.unified_search(
+            "edge source recall token",
+            pools=["memory"],
+            limit=5,
+            _internal=False,
+        )
+        self.assertIn(target_id, [r["id"] for r in normal_results if r.get("edge_relation")])
+
+        db = db_mod._get_db()
+        try:
+            surfaced = db.execute(
+                "SELECT surfaced_count FROM memory_edges WHERE id = ?",
+                (edge["edge_id"],),
+            ).fetchone()["surfaced_count"]
+        finally:
+            db.close()
+        self.assertEqual(surfaced, 1)
 
     def test_single_cjk_word_query_recalls_memory_in_text_fallback(self):
         target_id = _insert_memory(
