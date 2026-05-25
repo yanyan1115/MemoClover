@@ -192,6 +192,128 @@ class MemoryApiStabilityTests(unittest.TestCase):
         self.assertFalse(empty_existing["ok"])
         self.assertIn("No update fields provided", empty_existing["error"])
 
+    def test_schema_has_layer_column_and_idempotent_migration(self):
+        db = db_mod._get_db()
+        try:
+            db_mod._init_tables(db)
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(memories)").fetchall()
+            }
+            indexes = {
+                row["name"]
+                for row in db.execute("PRAGMA index_list(memories)").fetchall()
+            }
+        finally:
+            db.close()
+
+        self.assertIn("layer", columns)
+        self.assertIn("idx_memories_layer", indexes)
+
+    def test_layer_remember_list_search_and_update(self):
+        legacy_id = _memory_id_from_response(
+            server.memory_remember("layercompat shared legacy memory", category="facts")
+        )
+        project_id = _memory_id_from_response(
+            server.memory_remember(
+                "layercompat shared project memory",
+                category="facts",
+                layer="project_memory",
+            )
+        )
+        temp_id = _memory_id_from_response(
+            server.memory_remember(
+                "layercompat shared temporary memory",
+                category="facts",
+                layer="temporary_summaries",
+            )
+        )
+
+        self.assertIsNone(_memory_row(legacy_id)["layer"])
+        self.assertEqual(_memory_row(project_id)["layer"], "project_memory")
+        self.assertEqual(_memory_row(temp_id)["layer"], "temporary_summaries")
+
+        all_results = server.memory_search("layercompat shared", limit=10)
+        self.assertIn("layercompat shared legacy memory", all_results)
+        self.assertIn("layercompat shared project memory", all_results)
+        self.assertIn("layercompat shared temporary memory", all_results)
+
+        project_results = server.memory_search(
+            "layercompat shared",
+            limit=10,
+            layer="project_memory",
+        )
+        self.assertIn(f"#{project_id}", project_results)
+        self.assertIn("layercompat shared project memory", project_results)
+        self.assertNotIn("layercompat shared legacy memory", project_results)
+        self.assertNotIn("layercompat shared temporary memory", project_results)
+
+        project_list = server.memory_list(layer="project_memory")
+        self.assertIn("layercompat shared project memory", project_list)
+        self.assertNotIn("layercompat shared legacy memory", project_list)
+
+        no_clear = server.memory_update(
+            project_id,
+            content="layercompat project renamed memory",
+            layer="",
+        )
+        self.assertIn(f"Updated memory #{project_id}", no_clear)
+        self.assertEqual(_memory_row(project_id)["layer"], "project_memory")
+
+        changed = server.memory_update(project_id, layer="long_term_preferences")
+        self.assertIn(f"Updated memory #{project_id}", changed)
+        self.assertEqual(_memory_row(project_id)["layer"], "long_term_preferences")
+
+    def test_layer_filter_searches_only_memory_pool(self):
+        memory_id = _memory_id_from_response(
+            server.memory_remember(
+                "poolscope project memory needle",
+                layer="project_memory",
+            )
+        )
+        db = db_mod._get_db()
+        try:
+            db.execute(
+                """INSERT INTO conversation_log
+                   (platform, direction, speaker, content, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    "test",
+                    "in",
+                    "tester",
+                    "poolscope conversation needle should not appear",
+                    "2026-05-25 10:00:00",
+                ),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        filtered = server.memory_search("poolscope needle", layer="project_memory")
+
+        self.assertIn(f"#{memory_id}", filtered)
+        self.assertIn("poolscope project memory needle", filtered)
+        self.assertNotIn("poolscope conversation needle should not appear", filtered)
+        self.assertNotIn("Conversation", filtered)
+
+    def test_invalid_layer_returns_clear_errors(self):
+        remember = server.memory_remember("bad layer remember", layer="not_a_layer")
+        search = server.memory_search("anything", layer="not_a_layer")
+        listing = server.memory_list(layer="not_a_layer")
+
+        memory_id = _memory_id_from_response(server.memory_remember("bad layer update target"))
+        update = server.memory_update(memory_id, layer="not_a_layer")
+
+        for response in (remember, search, listing, update):
+            self.assertIn("Error: invalid memory layer", response)
+
+    def test_normalize_layer_treats_empty_as_legacy(self):
+        self.assertIsNone(mm.normalize_layer(None))
+        self.assertIsNone(mm.normalize_layer(""))
+        self.assertEqual(mm.normalize_layer("project_memory"), "project_memory")
+        with self.assertRaises(ValueError):
+            mm.normalize_layer("unknown")
+
 
 if __name__ == "__main__":
     try:

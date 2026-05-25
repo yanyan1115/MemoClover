@@ -85,30 +85,43 @@ def memory_remember(
     importance: int = 5,
     valence: float = 0.5,
     arousal: float = 0.3,
+    layer: str = "",
 ) -> str:
     """Store a memory. Call this when you encounter important information worth recalling in future conversations.
     category: facts/events/tasks/experience/general
+    layer: optional memory layer: long_term_preferences, project_memory, or temporary_summaries.
     source: free-form label for where the info came from (e.g. cc, chat, api)
     valence: 0..1 emotional valence (0=negative, 1=positive). arousal: 0..1 intensity (0=calm, 1=excited).
     DO NOT store: code patterns/file paths derivable from the codebase, git history, or info already in CLAUDE.md."""
-    return remember(
-        content=content,
-        category=category,
-        source=source,
-        importance=importance,
-        valence=valence,
-        arousal=arousal,
-    )
+    try:
+        return remember(
+            content=content,
+            category=category,
+            source=source,
+            importance=importance,
+            valence=valence,
+            arousal=arousal,
+            layer=layer,
+        )
+    except ValueError as exc:
+        return f"Error: {exc}"
 
 
 @mcp.tool()
-def memory_search(query: str, limit: int = 10, after: Optional[str] = None, before: Optional[str] = None) -> str:
+def memory_search(
+    query: str,
+    limit: int = 10,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    layer: str = "",
+) -> str:
     """Search across all memory pools (memories, knowledge bank, conversations) using RRF fusion.
     Combines FTS5 keyword, vector semantic, and exact-match channels with per-pool reranking.
     Falls back to keyword-only if no embedding provider is configured.
-    after/before: ISO date strings to filter by time range (e.g. '2026-04-01' or '2026-04-01T10:00:00')."""
+    after/before: ISO date strings to filter by time range (e.g. '2026-04-01' or '2026-04-01T10:00:00').
+    layer: optional memory layer filter. When set, only the memories pool is searched."""
     try:
-        return unified_search_text(query=query, limit=limit, after=after, before=before)
+        return unified_search_text(query=query, limit=limit, after=after, before=before, layer=layer)
     except ValueError as exc:
         return f"Error: {exc}"
 
@@ -126,18 +139,26 @@ def memory_daily_log(text: str) -> str:
 
 
 @mcp.tool()
-def memory_list(category: Optional[str] = None, limit: int = 20, after: Optional[str] = None, before: Optional[str] = None) -> str:
+def memory_list(
+    category: Optional[str] = None,
+    limit: int = 20,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    layer: str = "",
+) -> str:
     """List memories (newest first).
-    after/before: ISO date strings to filter by time range (e.g. '2026-04-01' or '2026-04-01T10:00:00')."""
+    after/before: ISO date strings to filter by time range (e.g. '2026-04-01' or '2026-04-01T10:00:00').
+    layer: optional memory layer filter."""
     try:
-        items = get_all(category=category, limit=limit, after=after, before=before)
+        items = get_all(category=category, limit=limit, after=after, before=before, layer=layer)
     except ValueError as exc:
         return f"Error: {exc}"
     if not items:
         return "No memories yet"
     lines = []
     for m_item in items:
-        lines.append(f"[{m_item['id']}] [{m_item['category']}|{m_item['source']}] {m_item['content']}  ({m_item['created_at']})")
+        layer_part = f"|{m_item['layer']}" if m_item.get("layer") else ""
+        lines.append(f"[{m_item['id']}] [{m_item['category']}|{m_item['source']}{layer_part}] {m_item['content']}  ({m_item['created_at']})")
     return "\n".join(lines)
 
 
@@ -158,9 +179,10 @@ def memory_update(
     importance: int = 0,
     resolved: int = -1,
     tags: str = "",
+    layer: str = "",
 ) -> str:
     """Update a memory by ID. Only pass fields you want to change.
-    content: new content (empty = keep). category: new category (empty = keep). importance: new value (0 = keep). resolved: -1 = keep, 0/1 = update. tags: comma-separated replacement tags."""
+    content: new content (empty = keep). category: new category (empty = keep). importance: new value (0 = keep). resolved: -1 = keep, 0/1 = update. tags: comma-separated replacement tags. layer: optional replacement layer; empty = keep."""
     result = update_memory(
         memory_id,
         content=content,
@@ -168,16 +190,20 @@ def memory_update(
         importance=importance,
         resolved=resolved,
         tags=tags,
+        layer=layer,
     )
     if result["ok"]:
         memory = result.get("memory") or {}
-        return "\n".join([
+        lines = [
             f"Updated memory #{memory_id}",
             f"Updated: {result.get('updated_at', '')}",
             f"Category: {memory.get('category', '')}",
             f"Tags: {memory.get('tags', '[]')}",
             f"Embedding: {result.get('embedding_status', 'unknown')}",
-        ])
+        ]
+        if memory.get("layer"):
+            lines.insert(3, f"Layer: {memory.get('layer')}")
+        return "\n".join(lines)
     return f"Error: {result['error']}"
 
 

@@ -103,6 +103,20 @@ The `~/.imprint-oauth.json` filename is kept for compatibility with existing Cla
 | `cc_execute` | Submit a Claude Code task. |
 | `cc_check` / `cc_tasks` | Check or list queued tasks. |
 
+## Memory Layers
+
+MemoClover supports an optional compatibility `layer` on rows in the `memories` table:
+
+- `long_term_preferences`: durable preferences, stable facts, fixed paths/services, recurring operations, project principles, and safety boundaries.
+- `project_memory`: project- or repository-scoped decisions, architecture notes, rejected approaches, TODOs, risks, and handoff notes.
+- `temporary_summaries`: memory-row summaries for recent or compressed conversations.
+
+The first implementation stage is intentionally conservative. Existing memories keep `layer` as `NULL` and continue to appear in default `memory_search` and `memory_list` results. MemoClover does not backfill, reclassify, clean, delete, or judge existing memory content.
+
+`memory_remember`, `memory_search`, `memory_list`, and `memory_update` accept an optional `layer` value. For `memory_update`, an empty `layer` means "do not change the current layer"; this stage does not provide a layer-clearing shortcut. When `memory_search` receives a layer filter, it searches only the `memories` pool, because knowledge bank chunks and conversation logs do not have layers.
+
+`temporary_summaries` is only a `memories.layer` value in this stage. It does not replace or migrate the separate `summaries` table, and it does not automatically expire or delete rows. Layer-specific priority, decay, expiry, and auto-recall injection policies are later strategy work on top of this compatibility field.
+
 ## Configuration
 
 MemoClover intentionally keeps the existing `IMPRINT_*` environment variables for backward compatibility. Existing Claude Imprint users can upgrade without moving their data directory.
@@ -345,6 +359,20 @@ OAuth credentials 会优先从 `~/.imprint-oauth.json` 读取，然后再从环�
 | `message_bus_read` / `message_bus_post` | 读取和写入共享消息总线。 |
 | `cc_execute` | 提交一个 Claude Code 任务。 |
 | `cc_check` / `cc_tasks` | 检查或列出队列任务。 |
+
+## 记忆层
+
+MemoClover 在 `memories` 表中支持一个可选的兼容字段 `layer`：
+
+- `long_term_preferences`：长期偏好、稳定事实、固定路径/服务/端口、常用运维命令、项目原则和安全边界。
+- `project_memory`：项目或仓库级决策、当前架构、已拒绝方案、TODO、风险和交接注意事项。
+- `temporary_summaries`：以 memory row 形式保存的近期会话摘要或压缩摘要。
+
+第一阶段刻意保持保守。旧记忆的 `layer` 保持 `NULL`，并且仍会出现在默认的 `memory_search` 和 `memory_list` 结果里。MemoClover 不会自动 backfill、重分类、清洗、删除或评价既有记忆内容。
+
+`memory_remember`、`memory_search`、`memory_list` 和 `memory_update` 都接受可选的 `layer`。对 `memory_update` 来说，空 `layer` 表示“不修改当前 layer”；第一阶段不提供快捷清空 layer 的能力。当 `memory_search` 传入 layer 过滤时，只搜索 `memories` 池，因为知识库 chunks 和对话日志没有 layer。
+
+`temporary_summaries` 在第一阶段只是 `memories.layer` 的一个取值。它不会替换或迁移独立的 `summaries` 表，也不会自动过期或删除记录。分层优先级、衰减、过期和 auto-recall 注入策略属于后续建立在兼容字段之上的策略层工作。
 
 ## 配置
 

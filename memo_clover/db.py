@@ -193,6 +193,7 @@ def _init_tables(db: sqlite3.Connection):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content TEXT NOT NULL,
             category TEXT DEFAULT 'general',
+            layer TEXT,
             source TEXT DEFAULT 'cc',
             tags TEXT DEFAULT '[]',
             importance INTEGER DEFAULT 5,
@@ -350,6 +351,15 @@ def _init_tables(db: sqlite3.Connection):
         except sqlite3.OperationalError as e:
             if "duplicate column name" not in str(e).lower():
                 raise
+
+    # Migration: add memory layer compatibility column
+    if "layer" not in mem_cols:
+        try:
+            db.execute("ALTER TABLE memories ADD COLUMN layer TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
+    db.execute("CREATE INDEX IF NOT EXISTS idx_memories_layer ON memories(layer)")
 
     # Migration: add summary column to conversation_log
     convlog_cols = {

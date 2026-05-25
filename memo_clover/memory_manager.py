@@ -84,6 +84,25 @@ WEIGHT_VECTOR = 0.4
 WEIGHT_FTS = 0.4
 WEIGHT_RECENCY = 0.2
 
+MEMORY_LAYERS = {
+    "long_term_preferences",
+    "project_memory",
+    "temporary_summaries",
+}
+
+
+def normalize_layer(layer: Optional[str]) -> Optional[str]:
+    """Normalize an optional memory layer, preserving legacy None/empty values."""
+    if layer is None:
+        return None
+    normalized = str(layer).strip()
+    if not normalized:
+        return None
+    if normalized not in MEMORY_LAYERS:
+        allowed = ", ".join(sorted(MEMORY_LAYERS))
+        raise ValueError(f"invalid memory layer '{layer}'. Expected one of: {allowed}")
+    return normalized
+
 
 # ─── Vector Embeddings ───────────────────────────────────
 
@@ -403,13 +422,14 @@ def _decay_rate_for_category(category: str) -> float:
 def remember(content: str, category: str = "general", source: str = "cc",
              tags: Optional[list[str]] = None, importance: int = 5,
              valence: float = 0.5, arousal: float = 0.3,
-             resolved: bool = True) -> str:
+             resolved: bool = True, layer: Optional[str] = None) -> str:
     """Store a memory with automatic dedup and conflict detection.
     - Exact duplicate content → skip
     - Semantic similarity ≥ 0.92 → skip (nearly identical)
     - Semantic similarity 0.85~0.92 → supersede: old memory marked historical, new one stored
     - Semantic similarity < 0.85 → new memory, stored directly
     """
+    layer_value = normalize_layer(layer)
     db = _get_db()
 
     existing = db.execute(
@@ -452,12 +472,12 @@ def remember(content: str, category: str = "general", source: str = "cc",
 
     cursor = db.execute(
         """INSERT INTO memories (
-               content, category, source, tags, importance,
+               content, category, layer, source, tags, importance,
                valence, arousal, resolved, decay_rate, created_at
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            content, category, source, tags_json, importance,
+            content, category, layer_value, source, tags_json, importance,
             valence, arousal, resolved_int, decay_rate, now,
         ),
     )
@@ -487,6 +507,8 @@ def remember(content: str, category: str = "general", source: str = "cc",
         f"Created: {now}\n"
         f"Tags: {tags_json}"
     )
+    if layer_value:
+        result += f"\nLayer: {layer_value}"
     if supersede_notes:
         result += "\n" + "\n".join(supersede_notes)
     return result
@@ -571,8 +593,13 @@ def update_memory(
     importance: int = 0,
     resolved: int = -1,
     tags=None,
+    layer: Optional[str] = "",
 ) -> dict:
     """Update a single memory by ID. Only non-empty/non-zero fields are changed."""
+    try:
+        layer_value = normalize_layer(layer)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     db = _get_db()
     row = db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
     if not row:
@@ -585,7 +612,8 @@ def update_memory(
     has_importance = importance > 0
     has_resolved = resolved in (0, 1)
     has_tags = tags_list is not None
-    if not any((has_content, has_category, has_importance, has_resolved, has_tags)):
+    has_layer = layer_value is not None
+    if not any((has_content, has_category, has_importance, has_resolved, has_tags, has_layer)):
         db.close()
         return {"ok": False, "error": "No update fields provided"}
 
@@ -593,6 +621,7 @@ def update_memory(
     new_category = category.strip() if has_category else row["category"]
     new_importance = importance if has_importance else row["importance"]
     new_resolved = resolved if has_resolved else row["resolved"]
+    new_layer = layer_value if has_layer else row["layer"]
     new_tags_json = (
         json.dumps(tags_list, ensure_ascii=False)
         if has_tags
@@ -607,11 +636,11 @@ def update_memory(
 
     db.execute(
         """UPDATE memories
-           SET content = ?, category = ?, tags = ?, importance = ?,
+           SET content = ?, category = ?, layer = ?, tags = ?, importance = ?,
                resolved = ?, decay_rate = ?, updated_at = ?
            WHERE id = ?""",
         (
-            new_content, new_category, new_tags_json, new_importance,
+            new_content, new_category, new_layer, new_tags_json, new_importance,
             new_resolved, new_decay_rate, updated_at, memory_id,
         ),
     )
@@ -793,10 +822,17 @@ def search_text(query: str, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def get_all(category: Optional[str] = None, limit: int = 50, after: Optional[str] = None, before: Optional[str] = None) -> list[dict]:
+def get_all(
+    category: Optional[str] = None,
+    limit: int = 50,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    layer: Optional[str] = None,
+) -> list[dict]:
     """Get all active memories (by time desc). Excludes superseded memories.
     after: ISO date string, only memories created on or after this date (e.g. '2026-04-01').
     before: ISO date string, only memories created on or before this date."""
+    layer_value = normalize_layer(layer)
     after_bound, before_bound = _normalize_time_bounds(after=after, before=before)
     db = _get_db()
     filters = []
@@ -804,6 +840,9 @@ def get_all(category: Optional[str] = None, limit: int = 50, after: Optional[str
     if category:
         filters.append("AND category = ?")
         params.append(category)
+    if layer_value:
+        filters.append("AND layer = ?")
+        params.append(layer_value)
     if after_bound:
         filters.append("AND created_at >= ?")
         params.append(after_bound)
@@ -1618,7 +1657,7 @@ def _rerank_conv(rrf_score: float, row: dict) -> float:
 
 # ─── Per-Pool Channel Search ────────────────────────────
 
-def _search_memory_channels(query, query_vec, db, *, category=None, limit=50, diagnostics=None):
+def _search_memory_channels(query, query_vec, db, *, category=None, layer=None, limit=50, diagnostics=None):
     """Return (fts_ranking, vec_ranking, like_ranking, details) for memory pool."""
     details = {}
     fts_ranking = []
@@ -1627,18 +1666,26 @@ def _search_memory_channels(query, query_vec, db, *, category=None, limit=50, di
     safe_q = _sanitize_fts(query)
     if safe_q:
         try:
-            cat_sql = "AND m.category = ?" if category else ""
-            params = [safe_q] + ([category] if category else []) + [limit]
+            filters = []
+            params = [safe_q]
+            if category:
+                filters.append("AND m.category = ?")
+                params.append(category)
+            if layer:
+                filters.append("AND m.layer = ?")
+                params.append(layer)
+            filter_sql = " ".join(filters)
+            params.append(limit)
             fts_rows = db.execute(
                 f"""SELECT m.id, m.content, m.category, m.source, m.importance,
-                           m.valence, m.arousal, m.resolved, m.decay_rate,
-                           m.created_at, m.recalled_count,
-                           m.last_accessed_at, m.pinned
-                    FROM memories_fts f
-                    JOIN memories m ON f.rowid = m.id
-                    WHERE memories_fts MATCH ? AND m.superseded_by IS NULL {cat_sql}
-                    ORDER BY f.rank
-                    LIMIT ?""",
+                            m.valence, m.arousal, m.resolved, m.decay_rate,
+                            m.created_at, m.recalled_count,
+                            m.last_accessed_at, m.pinned, m.layer
+                     FROM memories_fts f
+                     JOIN memories m ON f.rowid = m.id
+                     WHERE memories_fts MATCH ? AND m.superseded_by IS NULL {filter_sql}
+                     ORDER BY f.rank
+                     LIMIT ?""",
                 params,
             ).fetchall()
             for idx, r in enumerate(fts_rows):
@@ -1656,17 +1703,24 @@ def _search_memory_channels(query, query_vec, db, *, category=None, limit=50, di
 
     if query_vec:
         try:
-            cat_sql = "AND m.category = ?" if category else ""
-            params = [category] if category else []
+            filters = []
+            params = []
+            if category:
+                filters.append("AND m.category = ?")
+                params.append(category)
+            if layer:
+                filters.append("AND m.layer = ?")
+                params.append(layer)
+            filter_sql = " ".join(filters)
             vec_rows = db.execute(
                 f"""SELECT m.id, m.content, m.category, m.source, m.importance,
-                           m.valence, m.arousal, m.resolved, m.decay_rate,
-                           m.created_at, m.recalled_count,
-                           m.last_accessed_at, m.pinned,
-                           v.embedding
-                    FROM memories m
-                    JOIN memory_vectors v ON m.id = v.memory_id
-                    WHERE m.superseded_by IS NULL {cat_sql}""",
+                            m.valence, m.arousal, m.resolved, m.decay_rate,
+                            m.created_at, m.recalled_count,
+                            m.last_accessed_at, m.pinned, m.layer,
+                            v.embedding
+                     FROM memories m
+                     JOIN memory_vectors v ON m.id = v.memory_id
+                     WHERE m.superseded_by IS NULL {filter_sql}""",
                 params,
             ).fetchall()
 
@@ -1696,24 +1750,29 @@ def _search_memory_channels(query, query_vec, db, *, category=None, limit=50, di
     like_ranking = []
     like_terms = like_search_terms(query)
     if like_terms:
-        cat_sql = "AND category = ?" if category else ""
+        filters = []
+        if category:
+            filters.append("AND category = ?")
+        if layer:
+            filters.append("AND layer = ?")
+        filter_sql = " ".join(filters)
         where_sql = " OR ".join("LOWER(content) LIKE ?" for _ in like_terms)
         score_sql = " + ".join(
             "CASE WHEN LOWER(content) LIKE ? THEN 1 ELSE 0 END"
             for _ in like_terms
         )
         like_params = [f"%{term.lower()}%" for term in like_terms]
-        params = like_params + like_params + ([category] if category else []) + [LIKE_LIMIT]
+        params = like_params + like_params + ([category] if category else []) + ([layer] if layer else []) + [LIKE_LIMIT]
         like_rows = db.execute(
             f"""SELECT id, content, category, source, importance,
-                       valence, arousal, resolved, decay_rate,
-                       created_at, recalled_count,
-                       last_accessed_at, pinned,
-                       ({score_sql}) AS matched_terms
-                FROM memories
-                WHERE ({where_sql}) AND superseded_by IS NULL {cat_sql}
-                ORDER BY matched_terms DESC, created_at DESC
-                LIMIT ?""",
+                        valence, arousal, resolved, decay_rate,
+                        created_at, recalled_count,
+                        last_accessed_at, pinned, layer,
+                        ({score_sql}) AS matched_terms
+                 FROM memories
+                 WHERE ({where_sql}) AND superseded_by IS NULL {filter_sql}
+                 ORDER BY matched_terms DESC, created_at DESC
+                 LIMIT ?""",
             params,
         ).fetchall()
         like_ranking, like_details = _rank_like_rows(
@@ -1949,6 +2008,7 @@ def unified_search(
     limit: int = 10,
     pools: list[str] | None = None,
     category: str | None = None,
+    layer: str | None = None,
     platform: str = "",
     after: str | None = None,
     before: str | None = None,
@@ -1961,6 +2021,7 @@ def unified_search(
         limit:    max results to return
         pools:    subset of ["memory", "bank", "conversation"]; None = all
         category: filter memory pool by category
+        layer: filter memory pool by memory layer; when set, only memory pool is searched
         platform: filter conversation pool by platform
         after/before: ISO date strings to filter by time range
         _internal: skip side-effects (recalled_count, last_accessed_at) — for edge expansion
@@ -1968,7 +2029,10 @@ def unified_search(
     Returns list of dicts sorted by final score, each containing:
         pool, score, rrf_raw, id, content, + pool-specific fields
     """
-    if pools is None:
+    layer_value = normalize_layer(layer)
+    if layer_value:
+        pools = ["memory"] if pools is None else [p for p in pools if p == "memory"]
+    elif pools is None:
         pools = ["memory", "bank", "conversation"]
 
     after_bound, before_bound = _normalize_time_bounds(after=after, before=before)
@@ -1992,7 +2056,7 @@ def unified_search(
 
     if "memory" in pools:
         m_fts, m_vec, m_like, m_det = _search_memory_channels(
-            query, query_vec, db, category=category, diagnostics=diagnostics
+            query, query_vec, db, category=category, layer=layer_value, diagnostics=diagnostics
         )
         _inject_default_ranks(m_fts, m_vec)
         all_rankings += [m_fts, m_vec, m_like]
@@ -2119,11 +2183,20 @@ def unified_search_text(
     platform: str = "",
     after: str | None = None,
     before: str | None = None,
+    layer: str | None = None,
 ) -> str:
     """Format unified search results as readable text.
     Set IMPRINT_LOCALE=zh for Chinese labels, default English.
     after/before: ISO date strings to filter by time range."""
-    results = unified_search(query, limit=limit, pools=pools, platform=platform, after=after, before=before)
+    results = unified_search(
+        query,
+        limit=limit,
+        pools=pools,
+        platform=platform,
+        after=after,
+        before=before,
+        layer=layer,
+    )
     locale = os.environ.get("IMPRINT_LOCALE", "en")
     loc = _LOCALE_LABELS.get(locale, _LOCALE_LABELS["en"])
     if not results:
@@ -2142,11 +2215,12 @@ def unified_search_text(
             ts = r.get("created_at", "")
             memory_id = r.get("id", "")
             pin = " [pinned]" if r.get("pinned") else ""
+            layer_label = f"|{r.get('layer')}" if r.get("layer") else ""
             if r.get("source") == "edge":
                 rel = r.get("edge_relation", "")
                 lines.append(f"[{label}|edge|{rel}] #{memory_id} {content}")
             else:
-                lines.append(f"[{label}|{cat}|{ts}]{pin} #{memory_id} ({score}) {content}")
+                lines.append(f"[{label}|{cat}{layer_label}|{ts}]{pin} #{memory_id} ({score}) {content}")
 
         elif r["pool"] == "bank":
             src = r.get("source", "")
