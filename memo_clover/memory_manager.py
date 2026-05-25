@@ -25,7 +25,11 @@ from .db import (
 logger = logging.getLogger(__name__)
 
 # ─── Embedding Config ────────────────────────────────────
-_DEFAULT_MODELS = {"ollama": "bge-m3", "openai": "text-embedding-3-small"}
+_DEFAULT_MODELS = {
+    "ollama": "bge-m3",
+    "openai": "text-embedding-3-small",
+    "google": "gemini-embedding-2",
+}
 
 
 def _embedding_config_from_env() -> dict[str, str]:
@@ -42,6 +46,8 @@ def _embedding_config_from_env() -> dict[str, str]:
         ).strip(),
         "api_base": (os.environ.get("EMBED_API_BASE") or "https://api.openai.com").strip(),
         "api_path": (os.environ.get("EMBED_API_PATH") or "").strip(),
+        "google_api_key": (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip(),
+        "dimensions": (os.environ.get("EMBED_DIMENSIONS") or os.environ.get("GOOGLE_EMBED_DIMENSIONS") or "").strip(),
         "model": (os.environ.get("EMBED_MODEL") or _DEFAULT_MODELS.get(provider, "bge-m3")).strip(),
     }
 
@@ -67,6 +73,8 @@ EMBED_API_KEY = _EMBED_CONFIG["api_key"]
 OPENAI_API_KEY = EMBED_API_KEY
 EMBED_API_BASE = _EMBED_CONFIG["api_base"]
 EMBED_API_PATH = _EMBED_CONFIG["api_path"]
+GOOGLE_API_KEY = _EMBED_CONFIG["google_api_key"]
+EMBED_DIMENSIONS = _EMBED_CONFIG["dimensions"]
 EMBED_MODEL = _EMBED_CONFIG["model"]
 
 BANK_INDEX_VERSION = 2
@@ -163,6 +171,74 @@ def _embed_openai(text: str) -> Optional[list[float]]:
     return None
 
 
+def _google_embeddings_url(model: str | None = None) -> str:
+    resolved_model = (model or EMBED_MODEL or "gemini-embedding-2").split("/")[-1]
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{resolved_model}:embedContent"
+
+
+def _google_embedding_values(data: dict) -> Optional[list[float]]:
+    embedding = data.get("embedding") or {}
+    values = embedding.get("values")
+    if values:
+        return values
+    embeddings = data.get("embeddings") or []
+    if embeddings:
+        first = embeddings[0] or {}
+        return first.get("values") or (first.get("embedding") or {}).get("values")
+    return None
+
+
+def _embed_google(text: str) -> Optional[list[float]]:
+    """Generate embedding via Google Gemini Embedding API."""
+    if not GOOGLE_API_KEY:
+        logger.warning(
+            "Google embedding is configured but GOOGLE_API_KEY/GEMINI_API_KEY is empty; "
+            "provider=%s model=%s. Vector retrieval will fall back to text-only search.",
+            EMBED_PROVIDER,
+            EMBED_MODEL,
+        )
+        return None
+    try:
+        payload = {
+            "model": f"models/{(EMBED_MODEL or 'gemini-embedding-2').split('/')[-1]}",
+            "content": {"parts": [{"text": text}]},
+        }
+        if EMBED_DIMENSIONS:
+            payload["output_dimensionality"] = int(EMBED_DIMENSIONS)
+        url = _google_embeddings_url()
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GOOGLE_API_KEY,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        values = _google_embedding_values(data)
+        if values:
+            return values
+        logger.warning(
+            "Google embedding returned an empty payload; provider=%s model=%s url=%s. "
+            "Vector retrieval will fall back to text-only search.",
+            EMBED_PROVIDER,
+            EMBED_MODEL,
+            url,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Google embedding failed; provider=%s model=%s url=%s error=%s. "
+            "Vector retrieval will fall back to text-only search.",
+            EMBED_PROVIDER,
+            EMBED_MODEL,
+            _google_embeddings_url(),
+            exc,
+            exc_info=True,
+        )
+    return None
+
+
 def _embed(text: str) -> Optional[list[float]]:
     """Generate embedding vector using configured provider.
     Returns None on failure (search falls back to FTS5 keyword only)."""
@@ -171,6 +247,8 @@ def _embed(text: str) -> Optional[list[float]]:
             vec = _embed_openai(text)
         elif EMBED_PROVIDER == "ollama":
             vec = _embed_ollama(text)
+        elif EMBED_PROVIDER == "google":
+            vec = _embed_google(text)
         else:
             logger.warning(
                 "Unknown embedding provider '%s'; model=%s. "

@@ -60,6 +60,10 @@ class Phase2Tests(unittest.TestCase):
                 "EMBED_API_KEY",
                 "DEEPSEEK_API_KEY",
                 "OPENAI_API_KEY",
+                "GOOGLE_API_KEY",
+                "GEMINI_API_KEY",
+                "EMBED_DIMENSIONS",
+                "GOOGLE_EMBED_DIMENSIONS",
                 "EMBED_MODEL",
             )
         }
@@ -80,6 +84,48 @@ class Phase2Tests(unittest.TestCase):
             self.assertEqual(
                 mm._openai_embeddings_url(config["api_base"], config["api_path"]),
                 "https://api.deepseek.com/embeddings",
+            )
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            mm._embed = lambda _text: None
+
+    def test_google_embedding_config_loads_from_env(self):
+        old_env = {
+            key: os.environ.get(key)
+            for key in (
+                "EMBED_PROVIDER",
+                "GOOGLE_API_KEY",
+                "GEMINI_API_KEY",
+                "EMBED_DIMENSIONS",
+                "GOOGLE_EMBED_DIMENSIONS",
+                "EMBED_MODEL",
+            )
+        }
+        try:
+            os.environ["EMBED_PROVIDER"] = "google"
+            os.environ["GOOGLE_API_KEY"] = "google-test"
+            os.environ["EMBED_MODEL"] = "gemini-embedding-2"
+            os.environ["EMBED_DIMENSIONS"] = "1536"
+            os.environ.pop("GEMINI_API_KEY", None)
+            os.environ.pop("GOOGLE_EMBED_DIMENSIONS", None)
+
+            config = mm._embedding_config_from_env()
+
+            self.assertEqual(config["provider"], "google")
+            self.assertEqual(config["google_api_key"], "google-test")
+            self.assertEqual(config["model"], "gemini-embedding-2")
+            self.assertEqual(config["dimensions"], "1536")
+            self.assertEqual(
+                mm._google_embeddings_url(config["model"]),
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent",
+            )
+            self.assertEqual(
+                mm._google_embedding_values({"embedding": {"values": [0.1, 0.2]}}),
+                [0.1, 0.2],
             )
         finally:
             for key, value in old_env.items():

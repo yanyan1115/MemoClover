@@ -112,12 +112,14 @@ MemoClover intentionally keeps the existing `IMPRINT_*` environment variables fo
 | `IMPRINT_DATA_DIR` | `~/.imprint` | Base directory for database, logs, generated index, and bank files. |
 | `IMPRINT_DB` | `$IMPRINT_DATA_DIR/memory.db` | Explicit SQLite database path. |
 | `TZ_OFFSET` | `0` | Fixed UTC hour offset used by timestamps. |
-| `EMBED_PROVIDER` | `ollama` | Embedding provider, usually `ollama` or `openai`. Use `openai` for OpenAI-compatible services such as DeepSeek gateways. |
+| `EMBED_PROVIDER` | `ollama` | Embedding provider: `ollama`, `openai`, or `google`. Use `openai` for OpenAI-compatible services and `google` for Gemini Embedding. |
 | `EMBED_MODEL` | provider default | Embedding model name. |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. |
 | `EMBED_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | empty | API key for OpenAI-compatible embeddings. `EMBED_API_KEY` takes precedence. |
 | `EMBED_API_BASE` | `https://api.openai.com` | Base URL for OpenAI-compatible embedding APIs. |
 | `EMBED_API_PATH` | provider default | Optional embeddings path override. |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | empty | API key for Google Gemini Embedding. |
+| `EMBED_DIMENSIONS` / `GOOGLE_EMBED_DIMENSIONS` | provider default | Optional Google embedding output dimensionality, such as `768`, `1536`, or `3072`. |
 | `IMPRINT_LOCALE` | `en` | Search result labels; use `zh` for Chinese labels. |
 | `IMPRINT_BANK_EXCLUDE` | empty | Comma-separated Markdown bank filenames to skip. |
 
@@ -145,6 +147,15 @@ export EMBED_PROVIDER=openai
 export EMBED_API_BASE=https://api.deepseek.com
 export EMBED_API_KEY=sk-...
 export EMBED_MODEL=deepseek-v4-flash
+```
+
+For Google Gemini Embedding:
+
+```bash
+export EMBED_PROVIDER=google
+export GOOGLE_API_KEY=...
+export EMBED_MODEL=gemini-embedding-2
+export EMBED_DIMENSIONS=1536
 ```
 
 After changing embedding providers or models, call `memory_reindex` to rebuild vector rows and derived search indexes.
@@ -344,12 +355,14 @@ MemoClover 有意保留既有的 `IMPRINT_*` 环境变量，以保持向后兼�
 | `IMPRINT_DATA_DIR` | `~/.imprint` | 数据库、日志、生成索引和知识库文件的基础目录。 |
 | `IMPRINT_DB` | `$IMPRINT_DATA_DIR/memory.db` | 显式 SQLite 数据库路径。 |
 | `TZ_OFFSET` | `0` | 时间戳使用的固定 UTC 小时偏移。 |
-| `EMBED_PROVIDER` | `ollama` | Embedding provider，通常是 `ollama` 或 `openai`。DeepSeek gateway 等 OpenAI-compatible 服务使用 `openai`。 |
+| `EMBED_PROVIDER` | `ollama` | Embedding provider：`ollama`、`openai` 或 `google`。OpenAI-compatible 服务使用 `openai`，Gemini Embedding 使用 `google`。 |
 | `EMBED_MODEL` | provider default | Embedding 模型名称。 |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint。 |
 | `EMBED_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | empty | OpenAI-compatible embeddings 的 API key。优先使用 `EMBED_API_KEY`。 |
 | `EMBED_API_BASE` | `https://api.openai.com` | OpenAI-compatible embedding APIs 的 Base URL。 |
 | `EMBED_API_PATH` | provider default | 可选 embeddings path 覆盖。 |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | empty | Google Gemini Embedding 的 API key。 |
+| `EMBED_DIMENSIONS` / `GOOGLE_EMBED_DIMENSIONS` | provider default | 可选 Google embedding 输出维度，例如 `768`、`1536` 或 `3072`。 |
 | `IMPRINT_LOCALE` | `en` | 搜索结果标签；中文标签使用 `zh`。 |
 | `IMPRINT_BANK_EXCLUDE` | empty | 需要跳过的 Markdown 知识库文件名，逗号分隔。 |
 
@@ -377,6 +390,15 @@ export EMBED_PROVIDER=openai
 export EMBED_API_BASE=https://api.deepseek.com
 export EMBED_API_KEY=sk-...
 export EMBED_MODEL=deepseek-v4-flash
+```
+
+Google Gemini Embedding：
+
+```bash
+export EMBED_PROVIDER=google
+export GOOGLE_API_KEY=...
+export EMBED_MODEL=gemini-embedding-2
+export EMBED_DIMENSIONS=1536
 ```
 
 切换 embedding provider 或模型后，请调用 `memory_reindex` 重建向量行和派生搜索索引。
