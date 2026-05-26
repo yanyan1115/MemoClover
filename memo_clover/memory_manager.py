@@ -308,11 +308,164 @@ def _validate_memory_review_payload(payload: dict, memory_ids: set[int]) -> list
     return validated
 
 
+def _persist_memory_review_suggestions(suggestions: list[dict], *, model: str = "") -> list[dict]:
+    """Persist review suggestions without changing memories."""
+    if not suggestions:
+        return []
+    now = now_str()
+    db = _get_db()
+    persisted = []
+    try:
+        for item in suggestions:
+            suggested_layer = normalize_layer(item.get("suggested_layer")) if item.get("suggested_layer") else None
+            cursor = db.execute(
+                """INSERT INTO memory_review_suggestions (
+                       memory_id, suggested_layer, confidence, duplicate_candidates,
+                       merge_suggestion, temporary_summary_like, reason, model, status, created_at
+                   )
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (
+                    int(item["memory_id"]),
+                    suggested_layer,
+                    _clamp01(item.get("confidence"), 0.0),
+                    json.dumps(item.get("duplicate_candidates") or [], ensure_ascii=False),
+                    str(item.get("merge_suggestion") or "")[:600],
+                    1 if item.get("temporary_summary_like") else 0,
+                    str(item.get("reason") or "")[:600],
+                    model,
+                    now,
+                ),
+            )
+            persisted_item = dict(item)
+            persisted_item["suggestion_id"] = cursor.lastrowid
+            persisted_item["status"] = "pending"
+            persisted_item["created_at"] = now
+            persisted.append(persisted_item)
+        db.commit()
+    finally:
+        db.close()
+    return persisted
+
+
+def list_memory_review_suggestions(status: str = "pending", limit: int = 50) -> list[dict]:
+    """List memory review suggestions with memory previews for Dashboard approval."""
+    status_value = (status or "pending").strip().lower()
+    if status_value not in {"pending", "applied", "dismissed", "all"}:
+        raise ValueError("invalid review suggestion status")
+    limit_value = max(1, min(int(limit or 50), 200))
+    where = ""
+    params: list = []
+    if status_value != "all":
+        where = "WHERE s.status = ?"
+        params.append(status_value)
+    params.append(limit_value)
+
+    db = _get_db()
+    try:
+        rows = db.execute(
+            f"""SELECT
+                    s.id, s.memory_id, s.suggested_layer, s.confidence,
+                    s.duplicate_candidates, s.merge_suggestion,
+                    s.temporary_summary_like, s.reason, s.model, s.status,
+                    s.created_at, s.reviewed_at,
+                    m.content AS memory_content, m.category AS memory_category,
+                    m.layer AS current_layer, m.source AS memory_source,
+                    m.created_at AS memory_created_at
+                FROM memory_review_suggestions s
+                LEFT JOIN memories m ON m.id = s.memory_id
+                {where}
+                ORDER BY s.created_at DESC, s.id DESC
+                LIMIT ?""",
+            params,
+        ).fetchall()
+    finally:
+        db.close()
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["duplicate_candidates"] = json.loads(item.get("duplicate_candidates") or "[]")
+        except json.JSONDecodeError:
+            item["duplicate_candidates"] = []
+        item["temporary_summary_like"] = bool(item.get("temporary_summary_like"))
+        item["memory_exists"] = item.get("memory_content") is not None
+        items.append(item)
+    return items
+
+
+def apply_memory_review_suggestion(suggestion_id: int) -> dict:
+    """Apply only the suggested layer for one pending suggestion."""
+    db = _get_db()
+    now = now_str()
+    try:
+        row = db.execute(
+            """SELECT s.*, m.id AS existing_memory_id
+               FROM memory_review_suggestions s
+               LEFT JOIN memories m ON m.id = s.memory_id
+               WHERE s.id = ?""",
+            (suggestion_id,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "error": "review suggestion not found"}
+        suggestion = dict(row)
+        if suggestion.get("status") != "pending":
+            return {"ok": False, "error": f"review suggestion already {suggestion.get('status')}"}
+        if suggestion.get("existing_memory_id") is None:
+            return {"ok": False, "error": "memory not found"}
+        layer = normalize_layer(suggestion.get("suggested_layer"))
+        if not layer:
+            return {"ok": False, "error": "review suggestion has no applicable layer"}
+
+        db.execute(
+            "UPDATE memories SET layer = ?, updated_at = ? WHERE id = ?",
+            (layer, now, int(suggestion["memory_id"])),
+        )
+        db.execute(
+            "UPDATE memory_review_suggestions SET status = 'applied', reviewed_at = ? WHERE id = ?",
+            (now, suggestion_id),
+        )
+        db.commit()
+        return {
+            "ok": True,
+            "suggestion_id": suggestion_id,
+            "memory_id": int(suggestion["memory_id"]),
+            "applied_layer": layer,
+            "reviewed_at": now,
+        }
+    finally:
+        db.close()
+
+
+def dismiss_memory_review_suggestion(suggestion_id: int) -> dict:
+    """Dismiss one pending suggestion without changing memories."""
+    db = _get_db()
+    now = now_str()
+    try:
+        row = db.execute(
+            "SELECT id, status FROM memory_review_suggestions WHERE id = ?",
+            (suggestion_id,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "error": "review suggestion not found"}
+        if row["status"] != "pending":
+            return {"ok": False, "error": f"review suggestion already {row['status']}"}
+        db.execute(
+            "UPDATE memory_review_suggestions SET status = 'dismissed', reviewed_at = ? WHERE id = ?",
+            (now, suggestion_id),
+        )
+        db.commit()
+        return {"ok": True, "suggestion_id": suggestion_id, "reviewed_at": now}
+    finally:
+        db.close()
+
+
 def memory_review_layers(
     limit: int = 10,
     dry_run: bool = True,
     legacy_only: bool = True,
     retries: int = 1,
+    persist_suggestions: bool = False,
 ) -> dict:
     """Ask DeepSeek for read-only layer/dedup suggestions without modifying memories."""
     if not dry_run:
@@ -334,6 +487,7 @@ def memory_review_layers(
             "scanned": 0,
             "candidate_scope": "review_batch_only",
             "suggestions": [],
+            "persisted_suggestions": 0,
             "errors": [],
         }
 
@@ -353,7 +507,12 @@ def memory_review_layers(
                 "wrote": False,
                 "scanned": len(items),
                 "candidate_scope": "review_batch_only",
-                "suggestions": suggestions,
+                "suggestions": (
+                    _persist_memory_review_suggestions(suggestions, model=str(_memory_review_config()["model"]))
+                    if persist_suggestions
+                    else suggestions
+                ),
+                "persisted_suggestions": len(suggestions) if persist_suggestions else 0,
                 "errors": [],
             }
         except Exception as exc:
@@ -367,6 +526,7 @@ def memory_review_layers(
         "scanned": len(items),
         "candidate_scope": "review_batch_only",
         "suggestions": [],
+        "persisted_suggestions": 0,
         "errors": errors,
     }
 

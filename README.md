@@ -93,6 +93,8 @@ The `~/.imprint-oauth.json` filename is kept for compatibility with existing Cla
 | `memory_get_graph` | Inspect tags, edges, and neighboring memories. |
 | `memory_find_duplicates` | Audit semantically similar memory pairs. |
 | `memory_review_layers` | Ask DeepSeek for read-only layer, duplicate, and merge suggestions. |
+| `memory_review_queue` | List persisted review suggestions for human approval. |
+| `memory_review_apply_layer` / `memory_review_dismiss` | Apply only a suggested layer, or dismiss a suggestion. |
 | `memory_find_stale` | Find old or low-activity memories. |
 | `memory_decay` | Apply emotional time-decay logic, dry-run by default. |
 | `memory_reindex` | Rebuild vectors, FTS tables, and knowledge bank chunks. |
@@ -118,7 +120,9 @@ The first implementation stage is intentionally conservative. Existing memories 
 
 `temporary_summaries` is only a `memories.layer` value in this stage. It does not replace or migrate the separate `summaries` table, and it does not automatically expire or delete rows. Layer-specific priority, decay, expiry, and auto-recall injection policies are later strategy work on top of this compatibility field.
 
-`memory_review_layers` is a read-only DeepSeek review helper for this layer stage. By default it scans a small batch of active legacy memories where `layer IS NULL` or empty, asks DeepSeek Chat JSON Output for suggestions, and returns JSON containing `memory_id`, `suggested_layer`, `confidence`, `duplicate_candidates`, `merge_suggestion`, `temporary_summary_like`, and `reason`. It never updates `memories`, never deletes rows, never rewrites content, and rejects `dry_run=false`; humans must apply any accepted suggestion through explicit tools such as `memory_update`.
+`memory_review_layers` is a read-only DeepSeek review helper for this layer stage. By default it scans a small batch of active legacy memories where `layer IS NULL` or empty, asks DeepSeek Chat JSON Output for suggestions, and returns JSON containing `memory_id`, `suggested_layer`, `confidence`, `duplicate_candidates`, `merge_suggestion`, `temporary_summary_like`, and `reason`. It never updates `memories`, never deletes rows, never rewrites content, and rejects `dry_run=false`; humans must apply any accepted suggestion through explicit approval tools.
+
+When `persist_suggestions=true`, review results are stored in `memory_review_suggestions` as pending approval records. This writes only the review queue, not the canonical `memories` content. `memory_review_apply_layer` applies only `memories.layer` for one pending suggestion and then marks the suggestion applied. `memory_review_dismiss` marks the suggestion dismissed without changing the memory. Duplicate and merge suggestions remain display-only in this phase.
 
 DeepSeek is used only for classification/audit judgment here. It is not used as an embedding replacement; vector retrieval continues to use the configured embedding provider such as Google Gemini Embedding. If DeepSeek is unavailable, returns empty content, returns truncated output, or returns invalid JSON/schema, the review fails closed with no suggestions applied.
 
@@ -362,6 +366,8 @@ OAuth credentials 会优先从 `~/.imprint-oauth.json` 读取，然后再从环�
 | `memory_get_graph` | 查看标签、边和相邻记忆。 |
 | `memory_find_duplicates` | 审计语义相似的记忆对。 |
 | `memory_review_layers` | 调用 DeepSeek 生成只读 layer、重复和合并建议。 |
+| `memory_review_queue` | 列出已保存、等待人工确认的审计建议。 |
+| `memory_review_apply_layer` / `memory_review_dismiss` | 只应用建议 layer，或驳回建议。 |
 | `memory_find_stale` | 找出陈旧或低活跃度记忆。 |
 | `memory_decay` | 应用情绪时间衰减逻辑，默认 dry-run。 |
 | `memory_reindex` | 重建向量、FTS 表和知识库 chunks。 |
@@ -387,7 +393,9 @@ MemoClover 在 `memories` 表中支持一个可选的兼容字段 `layer`：
 
 `temporary_summaries` 在第一阶段只是 `memories.layer` 的一个取值。它不会替换或迁移独立的 `summaries` 表，也不会自动过期或删除记录。分层优先级、衰减、过期和 auto-recall 注入策略属于后续建立在兼容字段之上的策略层工作。
 
-`memory_review_layers` 是这个分层阶段的只读 DeepSeek 审计助手。默认只扫描一小批 active 且 `layer IS NULL` 或空字符串的 legacy 记忆，请 DeepSeek Chat JSON Output 返回建议 JSON，字段包括 `memory_id`、`suggested_layer`、`confidence`、`duplicate_candidates`、`merge_suggestion`、`temporary_summary_like` 和 `reason`。它不会更新 `memories`，不会删除行，不会改写内容，并且会拒绝 `dry_run=false`；任何采纳动作都必须由人确认后再通过 `memory_update` 等明确工具执行。
+`memory_review_layers` 是这个分层阶段的只读 DeepSeek 审计助手。默认只扫描一小批 active 且 `layer IS NULL` 或空字符串的 legacy 记忆，请 DeepSeek Chat JSON Output 返回建议 JSON，字段包括 `memory_id`、`suggested_layer`、`confidence`、`duplicate_candidates`、`merge_suggestion`、`temporary_summary_like` 和 `reason`。它不会更新 `memories`，不会删除行，不会改写内容，并且会拒绝 `dry_run=false`；任何采纳动作都必须由人确认后再通过明确审批工具执行。
+
+当 `persist_suggestions=true` 时，review 结果会保存到 `memory_review_suggestions` 作为待审批记录。这只写入审计队列，不写真实 `memories` 内容。`memory_review_apply_layer` 只会对一条 pending 建议应用 `memories.layer`，然后把建议标为 applied。`memory_review_dismiss` 只把建议标为 dismissed，不修改记忆。重复和合并建议在这个阶段只展示，不执行。
 
 这里 DeepSeek 只做分类和审计判断，不作为 embedding 替代。向量检索继续使用当前配置的 embedding provider，例如 Google Gemini Embedding。DeepSeek 不可用、返回空内容、输出截断、JSON 或 schema 非法时，review 会 fail closed，不应用任何建议。
 

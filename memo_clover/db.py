@@ -293,6 +293,23 @@ def _init_tables(db: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_edges_source ON memory_edges(source_id);
         CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges(target_id);
+
+        CREATE TABLE IF NOT EXISTS memory_review_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            suggested_layer TEXT,
+            confidence REAL DEFAULT 0,
+            duplicate_candidates TEXT DEFAULT '[]',
+            merge_suggestion TEXT DEFAULT '',
+            temporary_summary_like INTEGER DEFAULT 0,
+            reason TEXT DEFAULT '',
+            model TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_review_status ON memory_review_suggestions(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_review_memory ON memory_review_suggestions(memory_id);
     """)
 
     # Migration: add superseded_by column if missing

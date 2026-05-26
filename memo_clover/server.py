@@ -33,6 +33,9 @@ from .memory_manager import (
     unified_search_text, pin_memory, unpin_memory,
     add_tags, get_tags, add_edge, get_edges, get_surfacing_memories,
     memory_review_layers as _memory_review_layers,
+    list_memory_review_suggestions as _list_memory_review_suggestions,
+    apply_memory_review_suggestion as _apply_memory_review_suggestion,
+    dismiss_memory_review_suggestion as _dismiss_memory_review_suggestion,
     get_relationship_snapshot as _get_relationship_snapshot,
     save_summary as _save_summary,
     get_recent_summaries as _get_recent_summaries,
@@ -272,10 +275,39 @@ def memory_decay(days: int = 30, dry_run: bool = True) -> str:
 
 
 @mcp.tool()
-def memory_review_layers(limit: int = 10, dry_run: bool = True, legacy_only: bool = True) -> str:
+def memory_review_layers(limit: int = 10, dry_run: bool = True, legacy_only: bool = True, persist_suggestions: bool = False) -> str:
     """Ask DeepSeek for read-only layer and duplicate/merge suggestions.
-    This tool never writes to memories. dry_run=False is rejected; suggestions require human confirmation."""
-    result = _memory_review_layers(limit=limit, dry_run=dry_run, legacy_only=legacy_only)
+    This tool never writes to memories. dry_run=False is rejected; persist_suggestions only stores review queue items."""
+    result = _memory_review_layers(
+        limit=limit,
+        dry_run=dry_run,
+        legacy_only=legacy_only,
+        persist_suggestions=persist_suggestions,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def memory_review_queue(status: str = "pending", limit: int = 50) -> str:
+    """List memory review suggestions for human approval. status: pending/applied/dismissed/all."""
+    try:
+        items = _list_memory_review_suggestions(status=status, limit=limit)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    return json.dumps({"ok": True, "suggestions": items}, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def memory_review_apply_layer(suggestion_id: int) -> str:
+    """Apply only the suggested layer from a pending review suggestion."""
+    result = _apply_memory_review_suggestion(suggestion_id)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def memory_review_dismiss(suggestion_id: int) -> str:
+    """Dismiss one pending review suggestion without changing the memory."""
+    result = _dismiss_memory_review_suggestion(suggestion_id)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 

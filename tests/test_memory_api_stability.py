@@ -38,6 +38,7 @@ def _reset_database():
     db = db_mod._get_db()
     try:
         for table in (
+            "memory_review_suggestions",
             "memory_tags",
             "memory_vectors",
             "bank_chunks",
@@ -513,6 +514,115 @@ class MemoryApiStabilityTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertFalse(response["wrote"])
         self.assertIn("read-only", response["error"])
+        self.assertIsNone(_memory_row(memory_id)["layer"])
+
+    def test_memory_review_suggestions_schema_exists(self):
+        db = db_mod._get_db()
+        try:
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(memory_review_suggestions)").fetchall()
+            }
+            indexes = {
+                row["name"]
+                for row in db.execute("PRAGMA index_list(memory_review_suggestions)").fetchall()
+            }
+        finally:
+            db.close()
+
+        self.assertIn("memory_id", columns)
+        self.assertIn("suggested_layer", columns)
+        self.assertIn("status", columns)
+        self.assertIn("idx_memory_review_status", indexes)
+
+    def test_memory_review_layers_can_persist_suggestions_without_changing_memories(self):
+        legacy_id = _memory_id_from_response(server.memory_remember("review persist legacy target"))
+        original_call = mm._deepseek_chat_json
+
+        def fake_deepseek(_messages):
+            return {
+                "suggestions": [
+                    {
+                        "memory_id": legacy_id,
+                        "suggested_layer": "project_memory",
+                        "confidence": 0.91,
+                        "duplicate_candidates": [],
+                        "merge_suggestion": "",
+                        "temporary_summary_like": False,
+                        "reason": "project-scoped test",
+                    }
+                ]
+            }
+
+        try:
+            mm._deepseek_chat_json = fake_deepseek
+            response = json.loads(server.memory_review_layers(limit=5, persist_suggestions=True))
+        finally:
+            mm._deepseek_chat_json = original_call
+
+        self.assertTrue(response["ok"])
+        self.assertFalse(response["wrote"])
+        self.assertEqual(response["persisted_suggestions"], 1)
+        self.assertIsNone(_memory_row(legacy_id)["layer"])
+        suggestion_id = response["suggestions"][0]["suggestion_id"]
+        queue = json.loads(server.memory_review_queue(status="pending"))
+        self.assertEqual(queue["suggestions"][0]["id"], suggestion_id)
+        self.assertEqual(queue["suggestions"][0]["memory_id"], legacy_id)
+        self.assertEqual(queue["suggestions"][0]["suggested_layer"], "project_memory")
+
+    def test_memory_review_apply_layer_only_updates_layer_once(self):
+        memory_id = _memory_id_from_response(server.memory_remember("review apply layer target"))
+        persisted = mm._persist_memory_review_suggestions(
+            [
+                {
+                    "memory_id": memory_id,
+                    "suggested_layer": "temporary_summaries",
+                    "confidence": 0.88,
+                    "duplicate_candidates": [],
+                    "merge_suggestion": "do not execute merge",
+                    "temporary_summary_like": True,
+                    "reason": "summary-like",
+                }
+            ],
+            model="test-model",
+        )
+        suggestion_id = persisted[0]["suggestion_id"]
+
+        applied = json.loads(server.memory_review_apply_layer(suggestion_id))
+        repeated = json.loads(server.memory_review_apply_layer(suggestion_id))
+        row = _memory_row(memory_id)
+
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["applied_layer"], "temporary_summaries")
+        self.assertEqual(row["layer"], "temporary_summaries")
+        self.assertEqual(row["content"], "review apply layer target")
+        self.assertFalse(repeated["ok"])
+        self.assertIn("already applied", repeated["error"])
+
+    def test_memory_review_dismiss_does_not_change_memory(self):
+        memory_id = _memory_id_from_response(server.memory_remember("review dismiss target"))
+        persisted = mm._persist_memory_review_suggestions(
+            [
+                {
+                    "memory_id": memory_id,
+                    "suggested_layer": "project_memory",
+                    "confidence": 0.7,
+                    "duplicate_candidates": [],
+                    "merge_suggestion": "",
+                    "temporary_summary_like": False,
+                    "reason": "dismiss test",
+                }
+            ],
+            model="test-model",
+        )
+        suggestion_id = persisted[0]["suggestion_id"]
+
+        dismissed = json.loads(server.memory_review_dismiss(suggestion_id))
+        applied = json.loads(server.memory_review_apply_layer(suggestion_id))
+
+        self.assertTrue(dismissed["ok"])
+        self.assertFalse(applied["ok"])
+        self.assertIn("already dismissed", applied["error"])
         self.assertIsNone(_memory_row(memory_id)["layer"])
 
 
