@@ -434,10 +434,33 @@ class MemoryApiStabilityTests(unittest.TestCase):
             }
         ])
 
-        self.assertIn("MUST be Simplified Chinese sentences", messages[0]["content"])
-        self.assertIn("Do not write English in reason or merge_suggestion", messages[0]["content"])
+        self.assertIn("reason 和 merge_suggestion 的值必须是简体中文句子", messages[0]["content"])
+        self.assertIn("不要在 reason 或 merge_suggestion 里写英文说明", messages[0]["content"])
         self.assertIn("简短中文判断理由", messages[0]["content"])
-        self.assertIn("Do not translate memory content itself", messages[0]["content"])
+        self.assertIn("不要翻译 memory content 本身", messages[0]["content"])
+
+    def test_memory_review_validation_replaces_english_explanations(self):
+        suggestions = mm._validate_memory_review_payload(
+            {
+                "suggestions": [
+                    {
+                        "memory_id": 1,
+                        "suggested_layer": "project_memory",
+                        "confidence": 0.82,
+                        "duplicate_candidates": [2],
+                        "merge_suggestion": "Could be merged with the other project note.",
+                        "temporary_summary_like": False,
+                        "reason": "Project-scoped operational note.",
+                    }
+                ]
+            },
+            {1, 2},
+        )
+
+        self.assertIn("项目", suggestions[0]["reason"])
+        self.assertIn("可能存在重复", suggestions[0]["merge_suggestion"])
+        self.assertNotIn("Project-scoped", suggestions[0]["reason"])
+        self.assertNotIn("Could be merged", suggestions[0]["merge_suggestion"])
 
     def test_memory_review_layers_returns_suggestions_without_writing(self):
         legacy_id = _memory_id_from_response(server.memory_remember("review layer legacy target"))

@@ -150,25 +150,25 @@ def _review_memories_for_layers(limit: int, *, legacy_only: bool = True) -> list
 def _memory_review_messages(items: list[dict]) -> list[dict[str, str]]:
     allowed_layers = sorted(MEMORY_LAYERS)
     system_prompt = f"""
-You are a read-only MemoClover memory review assistant.
-Return strict json only. Do not include markdown.
+你是 MemoClover 的只读记忆审计助手。
+只返回严格 JSON，不要输出 markdown。
 
-Goal:
-- Suggest a memory layer for each supplied memory.
-- Suggest possible duplicates or merge candidates only when visible in this batch.
-- Identify whether a memory looks like a temporary summary.
+目标：
+- 为每条输入记忆建议一个 memory layer。
+- 只在本批候选中可见时，建议可能重复或可合并的候选。
+- 判断记忆是否像 temporary summary。
 
-Hard safety rules:
-- You are an audit/suggestion system, not a cleanup worker.
-- Do not ask to delete, censor, sanitize, rewrite, downgrade, or filter memory content.
-- Do not classify romantic, intimate, adult, affectionate, or couple-like content as lower value because of that content.
-- Suggestions must require human confirmation before any database write.
+硬性安全规则：
+- 你是审计/建议系统，不是自动清理器。
+- 不要要求删除、审查、净化、改写、降权或过滤记忆内容。
+- 不要因为浪漫、亲密、成人向、暧昧、情侣互动等内容本身而判定为低价值。
+- 所有建议都必须由人确认后才允许产生数据库写入。
 
-Language:
-- The values of reason and merge_suggestion MUST be Simplified Chinese sentences.
-- Do not write English in reason or merge_suggestion, even when the memory content contains English words.
-- Keep allowed enum values and JSON field names exactly as specified.
-- Do not translate memory content itself.
+语言规则：
+- reason 和 merge_suggestion 的值必须是简体中文句子。
+- 即使记忆内容包含英文词，也不要在 reason 或 merge_suggestion 里写英文说明。
+- allowed enum values 和 JSON field names 必须保持原样，不要翻译。
+- 不要翻译 memory content 本身。
 
 Allowed suggested_layer values: {", ".join(allowed_layers)} or null when uncertain.
 
@@ -207,7 +207,7 @@ Output json shape:
     }
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Review these memories and return json:\n" + json.dumps(user_payload, ensure_ascii=False)},
+        {"role": "user", "content": "请审计这些记忆并只返回 JSON：\n" + json.dumps(user_payload, ensure_ascii=False)},
     ]
 
 
@@ -258,6 +258,50 @@ def _deepseek_chat_json(messages: list[dict[str, str]]) -> dict:
     return parsed
 
 
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", text or ""))
+
+
+def _fallback_memory_review_reason(
+    *,
+    suggested_layer: Optional[str],
+    confidence: float,
+    duplicate_candidates: list[int],
+    temporary_summary_like: bool,
+) -> str:
+    layer_names = {
+        "core_identity": "核心身份信息",
+        "long_term_preferences": "长期偏好或稳定背景",
+        "project_memory": "项目、任务或系统运行相关记录",
+        "session_memory": "当前会话内的阶段性上下文",
+        "temporary_summaries": "临时摘要或短期整理记录",
+    }
+    if suggested_layer:
+        detail = layer_names.get(suggested_layer, f"{suggested_layer} 层级")
+        reason = f"模型建议归入{detail}，置信度约为 {confidence:.2f}，请人工确认后再应用。"
+    else:
+        reason = f"模型没有给出稳定层级判断，置信度约为 {confidence:.2f}，建议人工复核。"
+    if duplicate_candidates:
+        reason += " 本批次中还存在可能重复候选。"
+    if temporary_summary_like:
+        reason += " 该记忆也呈现临时摘要特征。"
+    return reason
+
+
+def _normalize_review_explanation(
+    text: str,
+    *,
+    fallback: str,
+    allow_empty: bool = False,
+) -> str:
+    value = str(text or "").strip()[:600]
+    if not value and allow_empty:
+        return ""
+    if _has_cjk(value):
+        return value
+    return fallback[:600]
+
+
 def _validate_memory_review_payload(payload: dict, memory_ids: set[int]) -> list[dict]:
     suggestions = payload.get("suggestions")
     if not isinstance(suggestions, list):
@@ -298,16 +342,36 @@ def _validate_memory_review_payload(payload: dict, memory_ids: set[int]) -> list
                 raise ValueError("duplicate_candidates must contain numeric memory IDs")
             if candidate_id in memory_ids and candidate_id != memory_id:
                 duplicate_candidates.append(candidate_id)
+        duplicate_candidates = sorted(set(duplicate_candidates))
+        temporary_summary_like = bool(raw.get("temporary_summary_like", False))
+        fallback_reason = _fallback_memory_review_reason(
+            suggested_layer=suggested_layer,
+            confidence=confidence,
+            duplicate_candidates=duplicate_candidates,
+            temporary_summary_like=temporary_summary_like,
+        )
+        fallback_merge = (
+            "可能存在重复或可合并候选；请人工确认后再决定是否处理。"
+            if duplicate_candidates
+            else ""
+        )
 
         validated.append(
             {
                 "memory_id": memory_id,
                 "suggested_layer": suggested_layer,
                 "confidence": confidence,
-                "duplicate_candidates": sorted(set(duplicate_candidates)),
-                "merge_suggestion": str(raw.get("merge_suggestion") or "")[:600],
-                "temporary_summary_like": bool(raw.get("temporary_summary_like", False)),
-                "reason": str(raw.get("reason") or "")[:600],
+                "duplicate_candidates": duplicate_candidates,
+                "merge_suggestion": _normalize_review_explanation(
+                    raw.get("merge_suggestion"),
+                    fallback=fallback_merge,
+                    allow_empty=True,
+                ),
+                "temporary_summary_like": temporary_summary_like,
+                "reason": _normalize_review_explanation(
+                    raw.get("reason"),
+                    fallback=fallback_reason,
+                ),
             }
         )
 
