@@ -109,12 +109,17 @@ def normalize_layer(layer: Optional[str]) -> Optional[str]:
 
 def _memory_review_config() -> dict[str, str | int]:
     """Resolve DeepSeek review settings at call time so tests and services can override env."""
+    thinking = (os.environ.get("MEMORY_REVIEW_THINKING") or "disabled").strip().lower()
+    if thinking not in {"enabled", "disabled"}:
+        thinking = "disabled"
     return {
         "api_key": (os.environ.get("MEMORY_REVIEW_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or "").strip(),
         "api_base": (os.environ.get("MEMORY_REVIEW_API_BASE") or os.environ.get("DEEPSEEK_API_BASE") or "https://api.deepseek.com").strip(),
         "model": (os.environ.get("MEMORY_REVIEW_MODEL") or os.environ.get("DEEPSEEK_REVIEW_MODEL") or DEEPSEEK_REVIEW_DEFAULT_MODEL).strip(),
         "timeout": int(os.environ.get("MEMORY_REVIEW_TIMEOUT_SECONDS") or "30"),
         "max_tokens": int(os.environ.get("MEMORY_REVIEW_MAX_TOKENS") or "1800"),
+        "thinking": thinking,
+        "reasoning_effort": (os.environ.get("MEMORY_REVIEW_REASONING_EFFORT") or "high").strip().lower(),
     }
 
 
@@ -207,13 +212,17 @@ def _deepseek_chat_json(messages: list[dict[str, str]]) -> dict:
         raise RuntimeError("DEEPSEEK_API_KEY or MEMORY_REVIEW_API_KEY is not configured")
 
     endpoint = f"{str(config['api_base']).rstrip('/')}/chat/completions"
+    thinking = str(config["thinking"])
     payload = {
         "model": config["model"],
         "messages": messages,
         "response_format": {"type": "json_object"},
         "temperature": 0,
         "max_tokens": config["max_tokens"],
+        "thinking": {"type": thinking},
     }
+    if thinking == "enabled":
+        payload["reasoning_effort"] = config["reasoning_effort"]
     req = urllib.request.Request(
         endpoint,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

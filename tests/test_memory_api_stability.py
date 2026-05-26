@@ -315,6 +315,110 @@ class MemoryApiStabilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mm.normalize_layer("unknown")
 
+    def test_memory_review_deepseek_payload_disables_thinking_by_default(self):
+        original_urlopen = mm.urllib.request.urlopen
+        original_env = {
+            key: os.environ.get(key)
+            for key in (
+                "MEMORY_REVIEW_API_KEY",
+                "MEMORY_REVIEW_THINKING",
+                "MEMORY_REVIEW_REASONING_EFFORT",
+            )
+        }
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": json.dumps({"suggestions": []})},
+                        }
+                    ]
+                }).encode()
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        try:
+            os.environ["MEMORY_REVIEW_API_KEY"] = "test-review-key"
+            os.environ.pop("MEMORY_REVIEW_THINKING", None)
+            os.environ.pop("MEMORY_REVIEW_REASONING_EFFORT", None)
+            mm.urllib.request.urlopen = fake_urlopen
+
+            result = mm._deepseek_chat_json([{"role": "user", "content": "json"}])
+        finally:
+            mm.urllib.request.urlopen = original_urlopen
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(result, {"suggestions": []})
+        self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", captured["payload"])
+
+    def test_memory_review_deepseek_payload_can_enable_thinking(self):
+        original_urlopen = mm.urllib.request.urlopen
+        original_env = {
+            key: os.environ.get(key)
+            for key in (
+                "MEMORY_REVIEW_API_KEY",
+                "MEMORY_REVIEW_THINKING",
+                "MEMORY_REVIEW_REASONING_EFFORT",
+            )
+        }
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": json.dumps({"suggestions": []})},
+                        }
+                    ]
+                }).encode()
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse()
+
+        try:
+            os.environ["MEMORY_REVIEW_API_KEY"] = "test-review-key"
+            os.environ["MEMORY_REVIEW_THINKING"] = "enabled"
+            os.environ["MEMORY_REVIEW_REASONING_EFFORT"] = "max"
+            mm.urllib.request.urlopen = fake_urlopen
+
+            mm._deepseek_chat_json([{"role": "user", "content": "json"}])
+        finally:
+            mm.urllib.request.urlopen = original_urlopen
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(captured["payload"]["thinking"], {"type": "enabled"})
+        self.assertEqual(captured["payload"]["reasoning_effort"], "max")
+
     def test_memory_review_layers_returns_suggestions_without_writing(self):
         legacy_id = _memory_id_from_response(server.memory_remember("review layer legacy target"))
         project_id = _memory_id_from_response(

@@ -142,6 +142,8 @@ MemoClover intentionally keeps the existing `IMPRINT_*` environment variables fo
 | `DEEPSEEK_API_KEY` / `MEMORY_REVIEW_API_KEY` | empty | API key for `memory_review_layers`. `MEMORY_REVIEW_API_KEY` takes precedence. |
 | `DEEPSEEK_API_BASE` / `MEMORY_REVIEW_API_BASE` | `https://api.deepseek.com` | DeepSeek Chat API base URL for read-only memory review. |
 | `DEEPSEEK_REVIEW_MODEL` / `MEMORY_REVIEW_MODEL` | `deepseek-v4-flash` | DeepSeek model used by `memory_review_layers`. |
+| `MEMORY_REVIEW_THINKING` | `disabled` | DeepSeek thinking mode for memory review. Keep disabled for stable JSON classification; set `enabled` only for future complex audit experiments. |
+| `MEMORY_REVIEW_REASONING_EFFORT` | `high` | Reasoning effort sent only when `MEMORY_REVIEW_THINKING=enabled`. |
 | `MEMORY_REVIEW_TIMEOUT_SECONDS` | `30` | Network timeout for DeepSeek review calls. |
 | `MEMORY_REVIEW_MAX_TOKENS` | `1800` | Output token cap for DeepSeek JSON review responses. |
 | `IMPRINT_LOCALE` | `en` | Search result labels; use `zh` for Chinese labels. |
@@ -409,6 +411,8 @@ MemoClover 有意保留既有的 `IMPRINT_*` 环境变量，以保持向后兼�
 | `DEEPSEEK_API_KEY` / `MEMORY_REVIEW_API_KEY` | empty | `memory_review_layers` 使用的 API key。`MEMORY_REVIEW_API_KEY` 优先。 |
 | `DEEPSEEK_API_BASE` / `MEMORY_REVIEW_API_BASE` | `https://api.deepseek.com` | 只读 memory review 使用的 DeepSeek Chat API base URL。 |
 | `DEEPSEEK_REVIEW_MODEL` / `MEMORY_REVIEW_MODEL` | `deepseek-v4-flash` | `memory_review_layers` 使用的 DeepSeek 模型。 |
+| `MEMORY_REVIEW_THINKING` | `disabled` | memory review 使用的 DeepSeek 思考模式。为了稳定 JSON 分类默认关闭；只建议未来复杂审计实验时设为 `enabled`。 |
+| `MEMORY_REVIEW_REASONING_EFFORT` | `high` | 仅当 `MEMORY_REVIEW_THINKING=enabled` 时发送的 reasoning effort。 |
 | `MEMORY_REVIEW_TIMEOUT_SECONDS` | `30` | DeepSeek review 请求超时时间。 |
 | `MEMORY_REVIEW_MAX_TOKENS` | `1800` | DeepSeek JSON review 响应输出 token 上限。 |
 | `IMPRINT_LOCALE` | `en` | 搜索结果标签；中文标签使用 `zh`。 |
