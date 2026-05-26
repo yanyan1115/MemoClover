@@ -597,7 +597,14 @@ def _run_http():
 
     class OAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if request.url.path in ("/oauth/token", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource", "/oauth/authorize"):
+            if (
+                request.url.path in (
+                    "/oauth/token",
+                    "/.well-known/oauth-authorization-server",
+                    "/oauth/authorize",
+                )
+                or request.url.path.startswith("/.well-known/oauth-protected-resource")
+            ):
                 return await call_next(request)
             if not ACCESS_TOKEN:
                 return await call_next(request)
@@ -607,7 +614,17 @@ def _run_http():
             auth = request.headers.get("authorization", "")
             if auth == f"Bearer {ACCESS_TOKEN}":
                 return await call_next(request)
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            base = str(request.base_url).rstrip("/")
+            metadata_path = "/.well-known/oauth-protected-resource"
+            if request.url.path.startswith("/mcp"):
+                metadata_path += "/mcp"
+            return JSONResponse(
+                {"error": "unauthorized"},
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": f'Bearer resource_metadata="{base}{metadata_path}"',
+                },
+            )
 
     app = mcp.streamable_http_app()
     from starlette.routing import Route as _Route
@@ -619,8 +636,9 @@ def _run_http():
 
     async def oauth_protected_resource(request: Request):
         base = str(request.base_url).rstrip("/")
+        resource = f"{base}/mcp" if request.url.path.rstrip("/").endswith("/mcp") else base
         return JSONResponse({
-            "resource": base,
+            "resource": resource,
             "authorization_servers": [base],
         })
 
@@ -703,9 +721,10 @@ def _run_http():
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
     app.routes.insert(0, Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]))
-    app.routes.insert(1, Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]))
-    app.routes.insert(2, Route("/oauth/authorize", oauth_authorize, methods=["GET"]))
-    app.routes.insert(3, Route("/oauth/token", oauth_token, methods=["POST"]))
+    app.routes.insert(1, Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource, methods=["GET"]))
+    app.routes.insert(2, Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]))
+    app.routes.insert(3, Route("/oauth/authorize", oauth_authorize, methods=["GET"]))
+    app.routes.insert(4, Route("/oauth/token", oauth_token, methods=["POST"]))
     app.add_middleware(OAuthMiddleware)
 
     print("memo-clover HTTP mode (OAuth): http://0.0.0.0:8000/mcp", flush=True)
