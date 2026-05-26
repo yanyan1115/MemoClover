@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -313,6 +314,102 @@ class MemoryApiStabilityTests(unittest.TestCase):
         self.assertEqual(mm.normalize_layer("project_memory"), "project_memory")
         with self.assertRaises(ValueError):
             mm.normalize_layer("unknown")
+
+    def test_memory_review_layers_returns_suggestions_without_writing(self):
+        legacy_id = _memory_id_from_response(server.memory_remember("review layer legacy target"))
+        project_id = _memory_id_from_response(
+            server.memory_remember("review layer existing project", layer="project_memory")
+        )
+        original_call = mm._deepseek_chat_json
+
+        def fake_deepseek(_messages):
+            return {
+                "suggestions": [
+                    {
+                        "memory_id": legacy_id,
+                        "suggested_layer": "project_memory",
+                        "confidence": 0.82,
+                        "duplicate_candidates": [],
+                        "merge_suggestion": "",
+                        "temporary_summary_like": False,
+                        "reason": "project-scoped wording",
+                    }
+                ]
+            }
+
+        try:
+            mm._deepseek_chat_json = fake_deepseek
+            response = json.loads(server.memory_review_layers(limit=10))
+        finally:
+            mm._deepseek_chat_json = original_call
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["dry_run"])
+        self.assertFalse(response["wrote"])
+        self.assertEqual(response["scanned"], 1)
+        self.assertEqual(response["suggestions"][0]["memory_id"], legacy_id)
+        self.assertEqual(response["suggestions"][0]["suggested_layer"], "project_memory")
+        self.assertIsNone(_memory_row(legacy_id)["layer"])
+        self.assertEqual(_memory_row(project_id)["layer"], "project_memory")
+
+    def test_memory_review_layers_fails_closed_on_bad_deepseek_json(self):
+        memory_id = _memory_id_from_response(server.memory_remember("review layer invalid json guard"))
+        original_call = mm._deepseek_chat_json
+
+        try:
+            mm._deepseek_chat_json = lambda _messages: (_ for _ in ()).throw(ValueError("DeepSeek returned invalid JSON"))
+            response = json.loads(server.memory_review_layers(limit=5, dry_run=True))
+        finally:
+            mm._deepseek_chat_json = original_call
+
+        self.assertFalse(response["ok"])
+        self.assertFalse(response["wrote"])
+        self.assertEqual(response["suggestions"], [])
+        self.assertIn("DeepSeek returned invalid JSON", response["errors"][0])
+        self.assertIsNone(_memory_row(memory_id)["layer"])
+
+    def test_memory_review_layers_does_not_filter_intimate_content(self):
+        content = "review layer intimate romantic context should stay available for audit"
+        memory_id = _memory_id_from_response(server.memory_remember(content))
+        captured = {}
+        original_call = mm._deepseek_chat_json
+
+        def fake_deepseek(messages):
+            captured["prompt"] = messages[1]["content"]
+            return {
+                "suggestions": [
+                    {
+                        "memory_id": memory_id,
+                        "suggested_layer": None,
+                        "confidence": 0.2,
+                        "duplicate_candidates": [],
+                        "merge_suggestion": "",
+                        "temporary_summary_like": False,
+                        "reason": "uncertain layer",
+                    }
+                ]
+            }
+
+        try:
+            mm._deepseek_chat_json = fake_deepseek
+            response = json.loads(server.memory_review_layers(limit=5))
+        finally:
+            mm._deepseek_chat_json = original_call
+
+        self.assertTrue(response["ok"])
+        self.assertIn(content, captured["prompt"])
+        self.assertEqual(response["suggestions"][0]["memory_id"], memory_id)
+        self.assertIsNone(_memory_row(memory_id)["layer"])
+
+    def test_memory_review_layers_rejects_apply_mode_without_writing(self):
+        memory_id = _memory_id_from_response(server.memory_remember("review layer apply guard"))
+
+        response = json.loads(server.memory_review_layers(limit=5, dry_run=False))
+
+        self.assertFalse(response["ok"])
+        self.assertFalse(response["wrote"])
+        self.assertIn("read-only", response["error"])
+        self.assertIsNone(_memory_row(memory_id)["layer"])
 
 
 if __name__ == "__main__":

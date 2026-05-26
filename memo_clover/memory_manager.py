@@ -90,6 +90,9 @@ MEMORY_LAYERS = {
     "temporary_summaries",
 }
 
+MEMORY_REVIEW_MAX_LIMIT = 50
+DEEPSEEK_REVIEW_DEFAULT_MODEL = "deepseek-v4-flash"
+
 
 def normalize_layer(layer: Optional[str]) -> Optional[str]:
     """Normalize an optional memory layer, preserving legacy None/empty values."""
@@ -102,6 +105,261 @@ def normalize_layer(layer: Optional[str]) -> Optional[str]:
         allowed = ", ".join(sorted(MEMORY_LAYERS))
         raise ValueError(f"invalid memory layer '{layer}'. Expected one of: {allowed}")
     return normalized
+
+
+def _memory_review_config() -> dict[str, str | int]:
+    """Resolve DeepSeek review settings at call time so tests and services can override env."""
+    return {
+        "api_key": (os.environ.get("MEMORY_REVIEW_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or "").strip(),
+        "api_base": (os.environ.get("MEMORY_REVIEW_API_BASE") or os.environ.get("DEEPSEEK_API_BASE") or "https://api.deepseek.com").strip(),
+        "model": (os.environ.get("MEMORY_REVIEW_MODEL") or os.environ.get("DEEPSEEK_REVIEW_MODEL") or DEEPSEEK_REVIEW_DEFAULT_MODEL).strip(),
+        "timeout": int(os.environ.get("MEMORY_REVIEW_TIMEOUT_SECONDS") or "30"),
+        "max_tokens": int(os.environ.get("MEMORY_REVIEW_MAX_TOKENS") or "1800"),
+    }
+
+
+def _review_memories_for_layers(limit: int, *, legacy_only: bool = True) -> list[dict]:
+    """Fetch active memories for read-only layer review."""
+    bounded_limit = max(1, min(int(limit or 10), MEMORY_REVIEW_MAX_LIMIT))
+    where = ["superseded_by IS NULL"]
+    if legacy_only:
+        where.append("(layer IS NULL OR TRIM(layer) = '')")
+    where_sql = " AND ".join(where)
+
+    db = _get_db()
+    try:
+        rows = db.execute(
+            f"""SELECT id, content, category, layer, source, tags, importance, created_at
+                FROM memories
+                WHERE {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?""",
+            (bounded_limit,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    return [dict(row) for row in rows]
+
+
+def _memory_review_messages(items: list[dict]) -> list[dict[str, str]]:
+    allowed_layers = sorted(MEMORY_LAYERS)
+    system_prompt = f"""
+You are a read-only MemoClover memory review assistant.
+Return strict json only. Do not include markdown.
+
+Goal:
+- Suggest a memory layer for each supplied memory.
+- Suggest possible duplicates or merge candidates only when visible in this batch.
+- Identify whether a memory looks like a temporary summary.
+
+Hard safety rules:
+- You are an audit/suggestion system, not a cleanup worker.
+- Do not ask to delete, censor, sanitize, rewrite, downgrade, or filter memory content.
+- Do not classify romantic, intimate, adult, affectionate, or couple-like content as lower value because of that content.
+- Suggestions must require human confirmation before any database write.
+
+Allowed suggested_layer values: {", ".join(allowed_layers)} or null when uncertain.
+
+Output json shape:
+{{
+  "suggestions": [
+    {{
+      "memory_id": 123,
+      "suggested_layer": "project_memory",
+      "confidence": 0.73,
+      "duplicate_candidates": [456],
+      "merge_suggestion": "optional short suggestion, no rewritten content",
+      "temporary_summary_like": false,
+      "reason": "short operational reason"
+    }}
+  ]
+}}
+""".strip()
+    user_payload = {
+        "scope": "active_memories",
+        "candidate_scope": "review_batch_only",
+        "allowed_layers": allowed_layers,
+        "memories": [
+            {
+                "memory_id": item["id"],
+                "category": item.get("category"),
+                "current_layer": item.get("layer"),
+                "source": item.get("source"),
+                "tags": item.get("tags"),
+                "importance": item.get("importance"),
+                "created_at": item.get("created_at"),
+                "content": item.get("content"),
+            }
+            for item in items
+        ],
+    }
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "Review these memories and return json:\n" + json.dumps(user_payload, ensure_ascii=False)},
+    ]
+
+
+def _deepseek_chat_json(messages: list[dict[str, str]]) -> dict:
+    config = _memory_review_config()
+    api_key = str(config["api_key"])
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY or MEMORY_REVIEW_API_KEY is not configured")
+
+    endpoint = f"{str(config['api_base']).rstrip('/')}/chat/completions"
+    payload = {
+        "model": config["model"],
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0,
+        "max_tokens": config["max_tokens"],
+    }
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=int(config["timeout"])) as resp:
+        response = json.loads(resp.read().decode("utf-8"))
+
+    choices = response.get("choices") or []
+    if not choices:
+        raise ValueError("DeepSeek response did not include choices")
+    choice = choices[0] or {}
+    if choice.get("finish_reason") == "length":
+        raise ValueError("DeepSeek JSON response was truncated")
+    content = ((choice.get("message") or {}).get("content") or "").strip()
+    if not content:
+        raise ValueError("DeepSeek returned empty JSON content")
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError("DeepSeek returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("DeepSeek JSON root must be an object")
+    return parsed
+
+
+def _validate_memory_review_payload(payload: dict, memory_ids: set[int]) -> list[dict]:
+    suggestions = payload.get("suggestions")
+    if not isinstance(suggestions, list):
+        raise ValueError("DeepSeek JSON must contain a suggestions array")
+
+    validated = []
+    seen_ids = set()
+    for raw in suggestions:
+        if not isinstance(raw, dict):
+            raise ValueError("Each memory review suggestion must be an object")
+        try:
+            memory_id = int(raw.get("memory_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Each memory review suggestion needs a numeric memory_id")
+        if memory_id not in memory_ids:
+            raise ValueError(f"DeepSeek suggested unknown memory_id {memory_id}")
+        if memory_id in seen_ids:
+            raise ValueError(f"DeepSeek suggested duplicate memory_id {memory_id}")
+        seen_ids.add(memory_id)
+
+        layer_raw = raw.get("suggested_layer")
+        suggested_layer = normalize_layer(layer_raw) if layer_raw else None
+        try:
+            confidence = _clamp01(raw.get("confidence"), 0.0)
+        except Exception:
+            confidence = 0.0
+
+        duplicate_raw = raw.get("duplicate_candidates", [])
+        if duplicate_raw is None:
+            duplicate_raw = []
+        if not isinstance(duplicate_raw, list):
+            raise ValueError("duplicate_candidates must be an array")
+        duplicate_candidates = []
+        for candidate in duplicate_raw:
+            try:
+                candidate_id = int(candidate)
+            except (TypeError, ValueError):
+                raise ValueError("duplicate_candidates must contain numeric memory IDs")
+            if candidate_id in memory_ids and candidate_id != memory_id:
+                duplicate_candidates.append(candidate_id)
+
+        validated.append(
+            {
+                "memory_id": memory_id,
+                "suggested_layer": suggested_layer,
+                "confidence": confidence,
+                "duplicate_candidates": sorted(set(duplicate_candidates)),
+                "merge_suggestion": str(raw.get("merge_suggestion") or "")[:600],
+                "temporary_summary_like": bool(raw.get("temporary_summary_like", False)),
+                "reason": str(raw.get("reason") or "")[:600],
+            }
+        )
+
+    return validated
+
+
+def memory_review_layers(
+    limit: int = 10,
+    dry_run: bool = True,
+    legacy_only: bool = True,
+    retries: int = 1,
+) -> dict:
+    """Ask DeepSeek for read-only layer/dedup suggestions without modifying memories."""
+    if not dry_run:
+        return {
+            "ok": False,
+            "dry_run": False,
+            "wrote": False,
+            "scanned": 0,
+            "suggestions": [],
+            "error": "memory_review_layers is read-only; applying suggestions is not implemented",
+        }
+
+    items = _review_memories_for_layers(limit=limit, legacy_only=legacy_only)
+    if not items:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "wrote": False,
+            "scanned": 0,
+            "candidate_scope": "review_batch_only",
+            "suggestions": [],
+            "errors": [],
+        }
+
+    messages = _memory_review_messages(items)
+    errors = []
+    attempts = max(1, int(retries or 0) + 1)
+    for _ in range(attempts):
+        try:
+            payload = _deepseek_chat_json(messages)
+            suggestions = _validate_memory_review_payload(
+                payload,
+                {int(item["id"]) for item in items},
+            )
+            return {
+                "ok": True,
+                "dry_run": True,
+                "wrote": False,
+                "scanned": len(items),
+                "candidate_scope": "review_batch_only",
+                "suggestions": suggestions,
+                "errors": [],
+            }
+        except Exception as exc:
+            errors.append(str(exc))
+            logger.warning("Memory review failed closed: %s", exc, exc_info=True)
+
+    return {
+        "ok": False,
+        "dry_run": True,
+        "wrote": False,
+        "scanned": len(items),
+        "candidate_scope": "review_batch_only",
+        "suggestions": [],
+        "errors": errors,
+    }
 
 
 # ─── Vector Embeddings ───────────────────────────────────

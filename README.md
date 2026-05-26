@@ -92,6 +92,7 @@ The `~/.imprint-oauth.json` filename is kept for compatibility with existing Cla
 | `memory_add_edge` | Link two memories with a typed relationship. |
 | `memory_get_graph` | Inspect tags, edges, and neighboring memories. |
 | `memory_find_duplicates` | Audit semantically similar memory pairs. |
+| `memory_review_layers` | Ask DeepSeek for read-only layer, duplicate, and merge suggestions. |
 | `memory_find_stale` | Find old or low-activity memories. |
 | `memory_decay` | Apply emotional time-decay logic, dry-run by default. |
 | `memory_reindex` | Rebuild vectors, FTS tables, and knowledge bank chunks. |
@@ -117,6 +118,10 @@ The first implementation stage is intentionally conservative. Existing memories 
 
 `temporary_summaries` is only a `memories.layer` value in this stage. It does not replace or migrate the separate `summaries` table, and it does not automatically expire or delete rows. Layer-specific priority, decay, expiry, and auto-recall injection policies are later strategy work on top of this compatibility field.
 
+`memory_review_layers` is a read-only DeepSeek review helper for this layer stage. By default it scans a small batch of active legacy memories where `layer IS NULL` or empty, asks DeepSeek Chat JSON Output for suggestions, and returns JSON containing `memory_id`, `suggested_layer`, `confidence`, `duplicate_candidates`, `merge_suggestion`, `temporary_summary_like`, and `reason`. It never updates `memories`, never deletes rows, never rewrites content, and rejects `dry_run=false`; humans must apply any accepted suggestion through explicit tools such as `memory_update`.
+
+DeepSeek is used only for classification/audit judgment here. It is not used as an embedding replacement; vector retrieval continues to use the configured embedding provider such as Google Gemini Embedding. If DeepSeek is unavailable, returns empty content, returns truncated output, or returns invalid JSON/schema, the review fails closed with no suggestions applied.
+
 ## Configuration
 
 MemoClover intentionally keeps the existing `IMPRINT_*` environment variables for backward compatibility. Existing Claude Imprint users can upgrade without moving their data directory.
@@ -134,6 +139,11 @@ MemoClover intentionally keeps the existing `IMPRINT_*` environment variables fo
 | `EMBED_API_PATH` | provider default | Optional embeddings path override. |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | empty | API key for Google Gemini Embedding. |
 | `EMBED_DIMENSIONS` / `GOOGLE_EMBED_DIMENSIONS` | provider default | Optional Google embedding output dimensionality, such as `768`, `1536`, or `3072`. |
+| `DEEPSEEK_API_KEY` / `MEMORY_REVIEW_API_KEY` | empty | API key for `memory_review_layers`. `MEMORY_REVIEW_API_KEY` takes precedence. |
+| `DEEPSEEK_API_BASE` / `MEMORY_REVIEW_API_BASE` | `https://api.deepseek.com` | DeepSeek Chat API base URL for read-only memory review. |
+| `DEEPSEEK_REVIEW_MODEL` / `MEMORY_REVIEW_MODEL` | `deepseek-v4-flash` | DeepSeek model used by `memory_review_layers`. |
+| `MEMORY_REVIEW_TIMEOUT_SECONDS` | `30` | Network timeout for DeepSeek review calls. |
+| `MEMORY_REVIEW_MAX_TOKENS` | `1800` | Output token cap for DeepSeek JSON review responses. |
 | `IMPRINT_LOCALE` | `en` | Search result labels; use `zh` for Chinese labels. |
 | `IMPRINT_BANK_EXCLUDE` | empty | Comma-separated Markdown bank filenames to skip. |
 
@@ -349,6 +359,7 @@ OAuth credentials 会优先从 `~/.imprint-oauth.json` 读取，然后再从环�
 | `memory_add_edge` | 用带类型的关系连接两条记忆。 |
 | `memory_get_graph` | 查看标签、边和相邻记忆。 |
 | `memory_find_duplicates` | 审计语义相似的记忆对。 |
+| `memory_review_layers` | 调用 DeepSeek 生成只读 layer、重复和合并建议。 |
 | `memory_find_stale` | 找出陈旧或低活跃度记忆。 |
 | `memory_decay` | 应用情绪时间衰减逻辑，默认 dry-run。 |
 | `memory_reindex` | 重建向量、FTS 表和知识库 chunks。 |
@@ -374,6 +385,10 @@ MemoClover 在 `memories` 表中支持一个可选的兼容字段 `layer`：
 
 `temporary_summaries` 在第一阶段只是 `memories.layer` 的一个取值。它不会替换或迁移独立的 `summaries` 表，也不会自动过期或删除记录。分层优先级、衰减、过期和 auto-recall 注入策略属于后续建立在兼容字段之上的策略层工作。
 
+`memory_review_layers` 是这个分层阶段的只读 DeepSeek 审计助手。默认只扫描一小批 active 且 `layer IS NULL` 或空字符串的 legacy 记忆，请 DeepSeek Chat JSON Output 返回建议 JSON，字段包括 `memory_id`、`suggested_layer`、`confidence`、`duplicate_candidates`、`merge_suggestion`、`temporary_summary_like` 和 `reason`。它不会更新 `memories`，不会删除行，不会改写内容，并且会拒绝 `dry_run=false`；任何采纳动作都必须由人确认后再通过 `memory_update` 等明确工具执行。
+
+这里 DeepSeek 只做分类和审计判断，不作为 embedding 替代。向量检索继续使用当前配置的 embedding provider，例如 Google Gemini Embedding。DeepSeek 不可用、返回空内容、输出截断、JSON 或 schema 非法时，review 会 fail closed，不应用任何建议。
+
 ## 配置
 
 MemoClover 有意保留既有的 `IMPRINT_*` 环境变量，以保持向后兼容。现有 Claude Imprint 用户无需移动数据目录即可升级。
@@ -391,6 +406,11 @@ MemoClover 有意保留既有的 `IMPRINT_*` 环境变量，以保持向后兼�
 | `EMBED_API_PATH` | provider default | 可选 embeddings path 覆盖。 |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | empty | Google Gemini Embedding 的 API key。 |
 | `EMBED_DIMENSIONS` / `GOOGLE_EMBED_DIMENSIONS` | provider default | 可选 Google embedding 输出维度，例如 `768`、`1536` 或 `3072`。 |
+| `DEEPSEEK_API_KEY` / `MEMORY_REVIEW_API_KEY` | empty | `memory_review_layers` 使用的 API key。`MEMORY_REVIEW_API_KEY` 优先。 |
+| `DEEPSEEK_API_BASE` / `MEMORY_REVIEW_API_BASE` | `https://api.deepseek.com` | 只读 memory review 使用的 DeepSeek Chat API base URL。 |
+| `DEEPSEEK_REVIEW_MODEL` / `MEMORY_REVIEW_MODEL` | `deepseek-v4-flash` | `memory_review_layers` 使用的 DeepSeek 模型。 |
+| `MEMORY_REVIEW_TIMEOUT_SECONDS` | `30` | DeepSeek review 请求超时时间。 |
+| `MEMORY_REVIEW_MAX_TOKENS` | `1800` | DeepSeek JSON review 响应输出 token 上限。 |
 | `IMPRINT_LOCALE` | `en` | 搜索结果标签；中文标签使用 `zh`。 |
 | `IMPRINT_BANK_EXCLUDE` | empty | 需要跳过的 Markdown 知识库文件名，逗号分隔。 |
 

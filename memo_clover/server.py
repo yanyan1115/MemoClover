@@ -13,6 +13,7 @@ Or if installed:
 """
 
 import sys
+import json
 import logging
 import threading
 import time
@@ -31,6 +32,7 @@ from .memory_manager import (
     reindex_embeddings,
     unified_search_text, pin_memory, unpin_memory,
     add_tags, get_tags, add_edge, get_edges, get_surfacing_memories,
+    memory_review_layers as _memory_review_layers,
     get_relationship_snapshot as _get_relationship_snapshot,
     save_summary as _save_summary,
     get_recent_summaries as _get_recent_summaries,
@@ -267,6 +269,14 @@ def memory_decay(days: int = 30, dry_run: bool = True) -> str:
     if not result["details_decayed"] and not result["details_archived"]:
         lines.append("No memories need decay at this time.")
     return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_review_layers(limit: int = 10, dry_run: bool = True, legacy_only: bool = True) -> str:
+    """Ask DeepSeek for read-only layer and duplicate/merge suggestions.
+    This tool never writes to memories. dry_run=False is rejected; suggestions require human confirmation."""
+    result = _memory_review_layers(limit=limit, dry_run=dry_run, legacy_only=legacy_only)
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
