@@ -434,7 +434,8 @@ class MemoryApiStabilityTests(unittest.TestCase):
             }
         ])
 
-        self.assertIn("Write reason and merge_suggestion in Simplified Chinese", messages[0]["content"])
+        self.assertIn("MUST be Simplified Chinese sentences", messages[0]["content"])
+        self.assertIn("Do not write English in reason or merge_suggestion", messages[0]["content"])
         self.assertIn("简短中文判断理由", messages[0]["content"])
         self.assertIn("Do not translate memory content itself", messages[0]["content"])
 
@@ -616,6 +617,44 @@ class MemoryApiStabilityTests(unittest.TestCase):
         self.assertEqual(row["content"], "review apply layer target")
         self.assertFalse(repeated["ok"])
         self.assertIn("already applied", repeated["error"])
+
+    def test_memory_review_persist_supersedes_older_pending_suggestion(self):
+        memory_id = _memory_id_from_response(server.memory_remember("review duplicate pending target"))
+        first = mm._persist_memory_review_suggestions(
+            [
+                {
+                    "memory_id": memory_id,
+                    "suggested_layer": "project_memory",
+                    "confidence": 0.7,
+                    "duplicate_candidates": [],
+                    "merge_suggestion": "",
+                    "temporary_summary_like": False,
+                    "reason": "first suggestion",
+                }
+            ],
+            model="test-model",
+        )[0]
+        second = mm._persist_memory_review_suggestions(
+            [
+                {
+                    "memory_id": memory_id,
+                    "suggested_layer": "long_term_preferences",
+                    "confidence": 0.9,
+                    "duplicate_candidates": [],
+                    "merge_suggestion": "",
+                    "temporary_summary_like": False,
+                    "reason": "second suggestion",
+                }
+            ],
+            model="test-model",
+        )[0]
+
+        pending = json.loads(server.memory_review_queue(status="pending"))
+        superseded = json.loads(server.memory_review_queue(status="superseded"))
+
+        self.assertEqual([item["id"] for item in pending["suggestions"]], [second["suggestion_id"]])
+        self.assertEqual(pending["suggestions"][0]["suggested_layer"], "long_term_preferences")
+        self.assertEqual([item["id"] for item in superseded["suggestions"]], [first["suggestion_id"]])
 
     def test_memory_review_dismiss_does_not_change_memory(self):
         memory_id = _memory_id_from_response(server.memory_remember("review dismiss target"))

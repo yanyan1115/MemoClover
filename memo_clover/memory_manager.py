@@ -165,7 +165,8 @@ Hard safety rules:
 - Suggestions must require human confirmation before any database write.
 
 Language:
-- Write reason and merge_suggestion in Simplified Chinese.
+- The values of reason and merge_suggestion MUST be Simplified Chinese sentences.
+- Do not write English in reason or merge_suggestion, even when the memory content contains English words.
 - Keep allowed enum values and JSON field names exactly as specified.
 - Do not translate memory content itself.
 
@@ -322,7 +323,14 @@ def _persist_memory_review_suggestions(suggestions: list[dict], *, model: str = 
     persisted = []
     try:
         for item in suggestions:
+            memory_id = int(item["memory_id"])
             suggested_layer = normalize_layer(item.get("suggested_layer")) if item.get("suggested_layer") else None
+            db.execute(
+                """UPDATE memory_review_suggestions
+                   SET status = 'superseded', reviewed_at = ?
+                   WHERE memory_id = ? AND status = 'pending'""",
+                (now, memory_id),
+            )
             cursor = db.execute(
                 """INSERT INTO memory_review_suggestions (
                        memory_id, suggested_layer, confidence, duplicate_candidates,
@@ -330,7 +338,7 @@ def _persist_memory_review_suggestions(suggestions: list[dict], *, model: str = 
                    )
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
                 (
-                    int(item["memory_id"]),
+                    memory_id,
                     suggested_layer,
                     _clamp01(item.get("confidence"), 0.0),
                     json.dumps(item.get("duplicate_candidates") or [], ensure_ascii=False),
@@ -355,12 +363,21 @@ def _persist_memory_review_suggestions(suggestions: list[dict], *, model: str = 
 def list_memory_review_suggestions(status: str = "pending", limit: int = 50) -> list[dict]:
     """List memory review suggestions with memory previews for Dashboard approval."""
     status_value = (status or "pending").strip().lower()
-    if status_value not in {"pending", "applied", "dismissed", "all"}:
+    if status_value not in {"pending", "applied", "dismissed", "superseded", "all"}:
         raise ValueError("invalid review suggestion status")
     limit_value = max(1, min(int(limit or 50), 200))
     where = ""
     params: list = []
-    if status_value != "all":
+    if status_value == "pending":
+        where = """WHERE s.status = ?
+                   AND s.id = (
+                       SELECT MAX(s2.id)
+                       FROM memory_review_suggestions s2
+                       WHERE s2.status = 'pending'
+                         AND s2.memory_id = s.memory_id
+                   )"""
+        params.append(status_value)
+    elif status_value != "all":
         where = "WHERE s.status = ?"
         params.append(status_value)
     params.append(limit_value)
@@ -416,6 +433,19 @@ def apply_memory_review_suggestion(suggestion_id: int) -> dict:
         suggestion = dict(row)
         if suggestion.get("status") != "pending":
             return {"ok": False, "error": f"review suggestion already {suggestion.get('status')}"}
+        latest_pending = db.execute(
+            """SELECT MAX(id) AS latest_id
+               FROM memory_review_suggestions
+               WHERE memory_id = ? AND status = 'pending'""",
+            (int(suggestion["memory_id"]),),
+        ).fetchone()
+        if latest_pending and latest_pending["latest_id"] != suggestion_id:
+            db.execute(
+                "UPDATE memory_review_suggestions SET status = 'superseded', reviewed_at = ? WHERE id = ?",
+                (now, suggestion_id),
+            )
+            db.commit()
+            return {"ok": False, "error": "review suggestion already superseded"}
         if suggestion.get("existing_memory_id") is None:
             return {"ok": False, "error": "memory not found"}
         layer = normalize_layer(suggestion.get("suggested_layer"))
