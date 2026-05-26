@@ -420,6 +420,24 @@ class MemoryApiStabilityTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["thinking"], {"type": "enabled"})
         self.assertEqual(captured["payload"]["reasoning_effort"], "max")
 
+    def test_memory_review_prompt_requests_chinese_reasons(self):
+        messages = mm._memory_review_messages([
+            {
+                "id": 1,
+                "content": "中文记忆审计测试",
+                "category": "general",
+                "layer": None,
+                "source": "test",
+                "tags": "[]",
+                "importance": 5,
+                "created_at": "2026-05-26 12:00:00",
+            }
+        ])
+
+        self.assertIn("Write reason and merge_suggestion in Simplified Chinese", messages[0]["content"])
+        self.assertIn("简短中文判断理由", messages[0]["content"])
+        self.assertIn("Do not translate memory content itself", messages[0]["content"])
+
     def test_memory_review_layers_returns_suggestions_without_writing(self):
         legacy_id = _memory_id_from_response(server.memory_remember("review layer legacy target"))
         project_id = _memory_id_from_response(

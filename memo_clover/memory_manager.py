@@ -164,6 +164,11 @@ Hard safety rules:
 - Do not classify romantic, intimate, adult, affectionate, or couple-like content as lower value because of that content.
 - Suggestions must require human confirmation before any database write.
 
+Language:
+- Write reason and merge_suggestion in Simplified Chinese.
+- Keep allowed enum values and JSON field names exactly as specified.
+- Do not translate memory content itself.
+
 Allowed suggested_layer values: {", ".join(allowed_layers)} or null when uncertain.
 
 Output json shape:
@@ -174,9 +179,9 @@ Output json shape:
       "suggested_layer": "project_memory",
       "confidence": 0.73,
       "duplicate_candidates": [456],
-      "merge_suggestion": "optional short suggestion, no rewritten content",
+      "merge_suggestion": "可选的简短中文建议，不改写原文",
       "temporary_summary_like": false,
-      "reason": "short operational reason"
+      "reason": "简短中文判断理由"
     }}
   ]
 }}
