@@ -15,6 +15,7 @@ Or if installed:
 import sys
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -563,8 +564,8 @@ def experience_append(title: str, content: str) -> str:
     exp_path = Path(os.environ.get("IMPRINT_DATA_DIR", ".")) / "memory" / "bank" / "experience.md"
     if not exp_path.exists():
         exp_path.parent.mkdir(parents=True, exist_ok=True)
-        exp_path.write_text("# Experience Log\n")
-    with open(exp_path, "a") as f:
+        exp_path.write_text("# Experience Log\n", encoding="utf-8")
+    with open(exp_path, "a", encoding="utf-8") as f:
         f.write(f"\n## {title}\n{content}\n")
     return f"Added experience: {title}"
 

@@ -6,12 +6,65 @@ Supports session resumption for multi-turn conversations.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
+from pathlib import Path
 
 from .db import _get_db, now_str
 from .bus import bus_post
+
+
+def _node_version_key(path: Path) -> tuple:
+    match = re.match(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", path.parent.name)
+    if not match:
+        return (-1, -1, -1, path.parent.name)
+    return tuple(int(part or 0) for part in match.groups())
+
+
+def _nvm_bin_dirs(home: str | None = None) -> list[str]:
+    root = Path(home).expanduser() if home else Path.home()
+    nvm_root = root / ".nvm" / "versions" / "node"
+    if not nvm_root.exists():
+        return []
+    dirs = [path / "bin" for path in nvm_root.iterdir() if (path / "bin").is_dir()]
+    dirs.sort(key=lambda path: (_node_version_key(path), path.parent.name), reverse=True)
+    return [str(path) for path in dirs]
+
+
+def _build_claude_env(base_env: dict | None = None) -> dict:
+    env = {**(base_env or os.environ)}
+    env.pop("CLAUDECODE", None)
+
+    home = env.get("HOME") or str(Path.home())
+    path_parts = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.bun/bin"),
+        *_nvm_bin_dirs(home),
+    ]
+    if env.get("CLAUDE_BIN"):
+        path_parts.insert(0, str(Path(env["CLAUDE_BIN"]).expanduser().parent))
+    if env.get("PATH"):
+        path_parts.append(env["PATH"])
+
+    env["PATH"] = os.pathsep.join(part for part in path_parts if part)
+    return env
+
+
+def _resolve_claude_bin(env: dict | None = None) -> str:
+    env = env or _build_claude_env()
+    configured = env.get("CLAUDE_BIN", "").strip()
+    if configured:
+        return os.path.expanduser(configured)
+    found = shutil.which("claude", path=env.get("PATH"))
+    if found:
+        return found
+    for bin_dir in _nvm_bin_dirs(env.get("HOME")):
+        candidate = Path(bin_dir) / "claude"
+        if candidate.exists():
+            return str(candidate)
+    return os.path.expanduser("~/.local/bin/claude")
 
 
 def submit_task(prompt: str, source: str = "chat", session_id: str = "") -> dict:
@@ -74,10 +127,8 @@ def _execute_task(task_id: int, prompt: str, session_id: str = ""):
     db.commit()
     db.close()
 
-    claude_bin = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
-    env = {**os.environ}
-    env.pop("CLAUDECODE", None)
-    env["PATH"] = os.path.expanduser("~/.local/bin") + ":" + os.path.expanduser("~/.bun/bin") + ":" + env.get("PATH", "")
+    env = _build_claude_env()
+    claude_bin = _resolve_claude_bin(env)
 
     try:
         cmd = [claude_bin, "-p", prompt, "--permission-mode", "auto",
