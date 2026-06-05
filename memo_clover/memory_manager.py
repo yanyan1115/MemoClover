@@ -1411,7 +1411,55 @@ def daily_log(text: str) -> str:
     db.commit()
     db.close()
 
-    return f"Logged to {today}"
+    return (
+        f"Logged to {today}\n"
+        f"DB path: {Path(DB_PATH).expanduser().resolve()}\n"
+        f"Markdown file path: {log_file.expanduser().resolve()}"
+    )
+
+
+def read_daily_log(date: Optional[str] = None) -> dict:
+    """Read one daily log from SQLite and markdown storage without modifying data."""
+    day = (date or "").strip() or now_local().strftime("%Y-%m-%d")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise ValueError("date must use YYYY-MM-DD")
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("date must be a valid calendar date") from exc
+
+    log_file = DAILY_LOG_DIR / f"{day}.md"
+    db_path = Path(DB_PATH).expanduser().resolve()
+    file_path = log_file.expanduser().resolve()
+    file_exists = log_file.exists()
+    file_content = log_file.read_text(encoding="utf-8", errors="replace") if file_exists else ""
+
+    row = None
+    if db_path.exists():
+        db = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            row = db.execute("SELECT content FROM daily_logs WHERE date = ?", (day,)).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        finally:
+            db.close()
+
+    db_content = row["content"] if row else ""
+    content = db_content or file_content
+    return {
+        "date": day,
+        "db_path": str(db_path),
+        "db_exists": db_path.exists(),
+        "db_row_exists": row is not None,
+        "db_row_empty": not bool((db_content or "").strip()),
+        "markdown_file_path": str(file_path),
+        "markdown_file_exists": file_exists,
+        "markdown_file_empty": not bool((file_content or "").strip()),
+        "content_source": "db" if db_content else "markdown" if file_content else "none",
+        "content": content,
+        "empty": not bool((content or "").strip()),
+    }
 
 
 # ─── Notification Dedup ──────────────────────────────────

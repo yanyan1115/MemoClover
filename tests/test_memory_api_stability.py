@@ -42,6 +42,7 @@ def _reset_database():
             "memory_tags",
             "memory_vectors",
             "bank_chunks",
+            "daily_logs",
             "conversation_log",
             "memories",
         ):
@@ -49,6 +50,8 @@ def _reset_database():
         db.commit()
     finally:
         db.close()
+    for path in (Path(_TMP.name) / "memory").glob("*.md"):
+        path.unlink()
 
 
 def _memory_id_from_response(response: str) -> int:
@@ -152,6 +155,68 @@ class MemoryApiStabilityTests(unittest.TestCase):
         response = server.memory_list(after="not-a-date")
 
         self.assertIn("Error: invalid ISO 8601 timestamp", response)
+
+    def test_daily_log_read_reports_paths_and_content_without_writing(self):
+        write = server.memory_daily_log("test_daily_log_read marker")
+        today = mm.now_local().strftime("%Y-%m-%d")
+
+        self.assertIn(f"Logged to {today}", write)
+        self.assertIn(f"DB path: {db_mod.DB_PATH.resolve()}", write)
+        self.assertIn(f"Markdown file path: {(db_mod.DAILY_LOG_DIR / f'{today}.md').resolve()}", write)
+
+        read_default = server.memory_daily_log_read()
+        read_explicit = server.memory_daily_log_read(today)
+        invalid = server.memory_daily_log_read("2026-99-99")
+
+        for response in (read_default, read_explicit):
+            self.assertIn("Daily log read-only result", response)
+            self.assertIn(f"Date: {today}", response)
+            self.assertIn(f"DB path: {db_mod.DB_PATH.resolve()}", response)
+            self.assertIn(f"Markdown file path: {(db_mod.DAILY_LOG_DIR / f'{today}.md').resolve()}", response)
+            self.assertIn("DB row exists: True", response)
+            self.assertIn("DB row empty: False", response)
+            self.assertIn("Markdown file exists: True", response)
+            self.assertIn("Markdown file empty: False", response)
+            self.assertIn("Empty: False", response)
+            self.assertIn("test_daily_log_read marker", response)
+        self.assertIn("Error: date must be a valid calendar date", invalid)
+
+    def test_daily_log_read_missing_storage_does_not_create_files(self):
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(str(db_mod.DB_PATH) + suffix)
+            if path.exists():
+                path.unlink()
+
+        response = server.memory_daily_log_read("2026-01-02")
+
+        self.assertIn("Date: 2026-01-02", response)
+        self.assertIn("DB exists: False", response)
+        self.assertIn("DB row exists: False", response)
+        self.assertIn("Markdown file exists: False", response)
+        self.assertIn("Empty: True", response)
+        self.assertFalse(db_mod.DB_PATH.exists())
+        self.assertFalse((db_mod.DAILY_LOG_DIR / "2026-01-02.md").exists())
+
+    def test_memory_find_duplicates_defaults_to_quieter_threshold_and_stays_read_only(self):
+        original = server.find_duplicates
+        calls = []
+
+        def fake_find_duplicates(threshold=0.85):
+            calls.append(threshold)
+            return []
+
+        try:
+            server.find_duplicates = fake_find_duplicates
+            default_response = server.memory_find_duplicates()
+            custom_response = server.memory_find_duplicates(threshold=0.95)
+        finally:
+            server.find_duplicates = original
+
+        self.assertEqual(calls, [0.92, 0.95])
+        self.assertIn("above threshold 0.92", default_response)
+        self.assertIn("read-only", default_response)
+        self.assertIn("never merges or deletes", default_response)
+        self.assertIn("above threshold 0.95", custom_response)
 
     def test_update_content_updated_at_tags_and_search_index(self):
         memory_id = _memory_id_from_response(

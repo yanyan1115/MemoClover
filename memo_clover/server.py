@@ -28,7 +28,7 @@ if __name__ == "__main__" or not __package__:
 
 from mcp.server.fastmcp import FastMCP
 from .memory_manager import (
-    remember, search_text, forget, daily_log, get_all,
+    remember, search_text, forget, daily_log, read_daily_log, get_all,
     delete_memory, update_memory, find_duplicates, find_stale, decay_memories,
     reindex_embeddings,
     unified_search_text, pin_memory, unpin_memory,
@@ -145,6 +145,35 @@ def memory_daily_log(text: str) -> str:
 
 
 @mcp.tool()
+def memory_daily_log_read(date: str = "") -> str:
+    """Read a daily log without modifying data.
+    date: optional YYYY-MM-DD date; empty reads today."""
+    try:
+        result = read_daily_log(date=date)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    lines = [
+        "Daily log read-only result",
+        f"Date: {result['date']}",
+        f"DB path: {result['db_path']}",
+        f"DB exists: {result['db_exists']}",
+        f"DB row exists: {result['db_row_exists']}",
+        f"DB row empty: {result['db_row_empty']}",
+        f"Markdown file path: {result['markdown_file_path']}",
+        f"Markdown file exists: {result['markdown_file_exists']}",
+        f"Markdown file empty: {result['markdown_file_empty']}",
+        f"Content source: {result['content_source']}",
+        f"Empty: {result['empty']}",
+    ]
+    if result["empty"]:
+        lines.append("Content: (empty)")
+    else:
+        lines.extend(["Content:", result["content"].rstrip()])
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def memory_list(
     category: Optional[str] = None,
     limit: int = 20,
@@ -214,13 +243,20 @@ def memory_update(
 
 
 @mcp.tool()
-def memory_find_duplicates(threshold: float = 0.85) -> str:
+def memory_find_duplicates(threshold: float = 0.92) -> str:
     """Find semantically similar memory pairs (read-only). For dedup audits.
-    threshold: cosine similarity threshold, default 0.85."""
+    threshold: cosine similarity threshold, default 0.92. Raise it if results look related but not duplicated."""
     pairs = find_duplicates(threshold=threshold)
     if not pairs:
-        return "No similar memory pairs found above threshold"
-    lines = [f"Found {len(pairs)} similar pairs:\n"]
+        return (
+            f"No similar memory pairs found above threshold {threshold:.2f}\n"
+            "Tip: this audit is read-only and never merges or deletes memories."
+        )
+    lines = [
+        f"Found {len(pairs)} similar pairs above threshold {threshold:.2f}:",
+        "Tip: if pairs look merely related rather than duplicated, rerun with a higher threshold such as 0.95.",
+        "This audit is read-only and does not merge or delete memories.\n",
+    ]
     for p in pairs:
         lines.append(
             f"  [{p['similarity']:.3f}] #{p['id_a']} ({p['category_a']}) vs #{p['id_b']} ({p['category_b']})\n"
